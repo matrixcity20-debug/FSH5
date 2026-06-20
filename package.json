@@ -8,10 +8,11 @@
     "dev:client": "vite",
     "dev:server": "tsx watch --tsconfig server/tsconfig.json server/src/index.ts",
     "build": "vite build && npm run build:server",
-    "build:server": "tsc -p server/tsconfig.json && npm run build:server:bundle",
+    "build:server": "node build-server.mjs",
     "build:server:bundle": "node build-server.mjs",
     "start": "cross-env NODE_ENV=production node dist/server/index.mjs",
-    "typecheck": "tsc --noEmit && tsc -p server/tsconfig.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p server/tsconfig.json --noEmit",
+    "typecheck:server": "tsc -p server/tsconfig.json --noEmit"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",
