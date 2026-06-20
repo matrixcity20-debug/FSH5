@@ -86,7 +86,9 @@ interface SeederState {
 
 type UploadStep =
   | { phase: "idle" }
-  | { phase: "uploading"; progress: number }
+  | { phase: "hashing" }
+  | { phase: "uploading"; done: number; total: number }
+  | { phase: "finalizing" }
   | { phase: "chunking"; done: number; total: number }
   | { phase: "connecting" };
 
@@ -145,49 +147,100 @@ export default function UploadPage() {
 
   const isUploading = uploadStep.phase !== "idle";
 
-  // ── Server upload ──────────────────────────────────────────────────────────
-  const handleUpload = () => {
+  // ── Server upload (chunked, with SHA-256 integrity check) ─────────────────
+  const handleUpload = async () => {
     if (!file) return;
     abortRef.current = false;
-    setUploadStep({ phase: "uploading", progress: 0 });
 
-    const formData = new FormData();
-    formData.append("file", file);
-    if (ttl) formData.append("ttl", ttl);
+    const PART_SIZE = 5 * 1024 * 1024; // 5 MB per HTTP request
 
-    const xhr = new XMLHttpRequest();
-    xhrRef.current = xhr;
-    xhr.open("POST", "/api/files/upload", true);
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        setUploadStep({ phase: "uploading", progress: (e.loaded / e.total) * 100 });
-      }
-    };
-
-    xhr.onload = () => {
+    try {
+      // 1. Compute SHA-256 of the full file in the browser
+      setUploadStep({ phase: "hashing" });
+      const fileBuffer = await file.arrayBuffer();
       if (abortRef.current) return;
-      if (xhr.status >= 200 && xhr.status < 300) {
-        const response = JSON.parse(xhr.responseText) as { id: string };
-        toast({ title: "Upload complete", description: "File split and stored successfully." });
-        setLocation(`/files/${response.id}`);
-      } else {
-        let msg = "An error occurred";
-        try { msg = (JSON.parse(xhr.responseText) as { error?: string }).error ?? msg; } catch { /* ignore */ }
-        toast({ variant: "destructive", title: "Upload failed", description: msg });
-        resetState();
-      }
-    };
+      const hashBuffer = await crypto.subtle.digest("SHA-256", fileBuffer);
+      const sha256 = Array.from(new Uint8Array(hashBuffer))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
 
-    xhr.onerror = () => {
+      // 2. Initialise upload session on the server
+      const initRes = await fetch("/api/files/upload-init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: file.name,
+          size: file.size,
+          mimeType: file.type || "application/octet-stream",
+        }),
+      });
       if (abortRef.current) return;
-      toast({ variant: "destructive", title: "Upload failed", description: "Network error — check your connection." });
+      if (!initRes.ok) {
+        const msg = await parseErrorMessage(initRes);
+        throw new Error(msg);
+      }
+      const { uploadId } = await initRes.json() as { uploadId: string };
+
+      // 3. Upload parts sequentially
+      const totalParts = Math.ceil(file.size / PART_SIZE);
+      let bytesDone = 0;
+      setUploadStep({ phase: "uploading", done: 0, total: file.size });
+
+      for (let i = 0; i < totalParts; i++) {
+        if (abortRef.current) return;
+        const slice = file.slice(i * PART_SIZE, (i + 1) * PART_SIZE);
+        const fd = new FormData();
+        fd.append("uploadId", uploadId);
+        fd.append("partIndex", String(i));
+        fd.append("part", slice, file.name);
+
+        const partRes = await fetch("/api/files/upload-part", {
+          method: "POST",
+          body: fd,
+        });
+        if (abortRef.current) return;
+        if (!partRes.ok) {
+          const msg = await parseErrorMessage(partRes);
+          throw new Error(`Part ${i} failed: ${msg}`);
+        }
+
+        bytesDone += slice.size;
+        setUploadStep({ phase: "uploading", done: bytesDone, total: file.size });
+      }
+
+      // 4. Finalise — server assembles, verifies SHA-256, splits into chunks
+      if (abortRef.current) return;
+      setUploadStep({ phase: "finalizing" });
+
+      const finalRes = await fetch("/api/files/upload-finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          uploadId,
+          name: file.name,
+          size: file.size,
+          mimeType: file.type || "application/octet-stream",
+          totalParts,
+          sha256,
+          ...(ttl ? { ttl } : {}),
+        }),
+      });
+      if (abortRef.current) return;
+      if (!finalRes.ok) {
+        const msg = await parseErrorMessage(finalRes);
+        throw new Error(msg);
+      }
+
+      const meta = await finalRes.json() as { id: string };
+      toast({ title: "Upload complete ✓", description: "Integrity verified — file split and stored successfully." });
+      setLocation(`/files/${meta.id}`);
+
+    } catch (err) {
+      if (abortRef.current) return;
+      const msg = err instanceof Error ? err.message : "An error occurred";
+      toast({ variant: "destructive", title: "Upload failed", description: msg });
       resetState();
-    };
-
-    xhr.onabort = () => { /* handled by cancelUpload */ };
-
-    xhr.send(formData);
+    }
   };
 
   // ── P2P seed ───────────────────────────────────────────────────────────────
@@ -454,15 +507,19 @@ export default function UploadPage() {
 
   // ── Upload progress label ───────────────────────────────────────────────────
   const progressLabel = (() => {
-    if (uploadStep.phase === "uploading") return `Uploading… ${Math.round(uploadStep.progress)}%`;
-    if (uploadStep.phase === "chunking")  return `Splitting… ${uploadStep.done}/${uploadStep.total} chunks`;
+    if (uploadStep.phase === "hashing")    return "Computing hash…";
+    if (uploadStep.phase === "uploading")  return `Uploading… ${formatBytes(uploadStep.done)} / ${formatBytes(uploadStep.total)}`;
+    if (uploadStep.phase === "finalizing") return "Assembling & verifying integrity…";
+    if (uploadStep.phase === "chunking")   return `Splitting… ${uploadStep.done}/${uploadStep.total} chunks`;
     if (uploadStep.phase === "connecting") return "Connecting…";
     return "Processing…";
   })();
 
   const progressValue = (() => {
-    if (uploadStep.phase === "uploading") return uploadStep.progress;
-    if (uploadStep.phase === "chunking")  return (uploadStep.done / Math.max(1, uploadStep.total)) * 100;
+    if (uploadStep.phase === "hashing")    return 2;
+    if (uploadStep.phase === "uploading")  return 5 + (uploadStep.done / Math.max(1, uploadStep.total)) * 88;
+    if (uploadStep.phase === "finalizing") return 96;
+    if (uploadStep.phase === "chunking")   return (uploadStep.done / Math.max(1, uploadStep.total)) * 100;
     if (uploadStep.phase === "connecting") return 99;
     return 0;
   })();

@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 
 export const uploadsDir =
   process.env.NODE_ENV === "production"
@@ -23,6 +24,7 @@ export interface FileMeta {
   chunkUrls: string[];
   expiresAt?: string;
   seedOnly?: boolean;
+  sha256?: string;
 }
 
 export function ensureUploadsDir(): void {
@@ -182,6 +184,57 @@ export function buildChunkUrls(
     { length: chunkCount },
     (_, i) => `${baseUrl}/api/files/${fileId}/chunks/${i}`,
   );
+}
+
+export const UPLOAD_PART_SIZE = 5 * 1024 * 1024; // 5 MB per HTTP part
+
+export function getUploadTempDir(uploadId: string): string {
+  return path.join(uploadsDir, `upload_${uploadId}`);
+}
+
+export function getPartPath(uploadId: string, partIndex: number): string {
+  return path.join(getUploadTempDir(uploadId), `part_${partIndex}`);
+}
+
+export function cleanupUpload(uploadId: string): void {
+  try { fs.rmSync(getUploadTempDir(uploadId), { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+/** SHA-256 of a file on disk, streaming — never loads the whole file into RAM. */
+export function sha256File(filePath: string): string {
+  const hash = crypto.createHash("sha256");
+  const fd = fs.openSync(filePath, "r");
+  const buf = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let n: number;
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(buf.subarray(0, n));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * Concatenate ordered parts into a single temp file, then split into chunks.
+ * Returns chunk count. Cleans up both parts dir and assembled temp file.
+ */
+export function assembleAndSplit(uploadId: string, fileId: string, totalParts: number): number {
+  ensureUploadsDir();
+  const assembledPath = path.join(uploadsDir, `tmp_assembled_${fileId}`);
+  const wfd = fs.openSync(assembledPath, "w");
+  try {
+    for (let i = 0; i < totalParts; i++) {
+      const partPath = getPartPath(uploadId, i);
+      const data = fs.readFileSync(partPath);
+      fs.writeSync(wfd, data);
+    }
+  } finally {
+    fs.closeSync(wfd);
+  }
+  cleanupUpload(uploadId);
+  return splitAndSaveFromPath(fileId, assembledPath);
 }
 
 export function generateSnippet(meta: FileMeta, baseUrl: string): string {

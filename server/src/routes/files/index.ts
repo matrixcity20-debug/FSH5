@@ -17,7 +17,12 @@ import {
   isValidFileId,
   CHUNK_SIZE,
   MAX_FILE_SIZE,
+  UPLOAD_PART_SIZE,
   uploadsDir,
+  getUploadTempDir,
+  getPartPath,
+  cleanupUpload,
+  assembleAndSplit,
   type FileMeta,
 } from "../../lib/fileStore.js";
 
@@ -110,6 +115,163 @@ router.post(
     }
   },
 );
+
+// ── POST /files/upload-init ──────────────────────────────────────────────────
+// Initialises a multi-part upload session. Returns uploadId + partSize.
+router.post("/files/upload-init", async (req, res): Promise<void> => {
+  const { name, size, mimeType } = req.body as {
+    name: string;
+    size: number;
+    mimeType: string;
+  };
+
+  if (!name || typeof name !== "string" || name.length > 512) {
+    res.status(400).json({ error: "Invalid file name" });
+    return;
+  }
+  if (typeof size !== "number" || size <= 0 || size > MAX_FILE_SIZE) {
+    res.status(400).json({ error: `File too large (max ${MAX_FILE_SIZE / 1024 / 1024} MB)` });
+    return;
+  }
+  if (!mimeType || typeof mimeType !== "string") {
+    res.status(400).json({ error: "Invalid mimeType" });
+    return;
+  }
+
+  const uploadId = uuidv4();
+  ensureUploadsDir();
+  fs.mkdirSync(getUploadTempDir(uploadId), { recursive: true });
+
+  req.log.info({ uploadId, name, size }, "Upload session initialised");
+  res.status(201).json({ uploadId, partSize: UPLOAD_PART_SIZE });
+});
+
+// ── POST /files/upload-part ───────────────────────────────────────────────────
+// Receives one binary part. Body: multipart with fields uploadId, partIndex,
+// totalParts and a file field named "part".
+const partUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, _file, cb) => {
+      const uploadId = req.body?.uploadId as string | undefined;
+      if (!uploadId) { cb(new Error("Missing uploadId"), ""); return; }
+      const dir = getUploadTempDir(uploadId);
+      if (!fs.existsSync(dir)) { cb(new Error("Unknown uploadId"), ""); return; }
+      cb(null, dir);
+    },
+    filename: (req, _file, cb) => {
+      const idx = parseInt(req.body?.partIndex ?? "", 10);
+      cb(null, `part_${idx}`);
+    },
+  }),
+  limits: { fileSize: UPLOAD_PART_SIZE + 1024 },
+});
+
+router.post(
+  "/files/upload-part",
+  partUpload.single("part"),
+  async (req, res): Promise<void> => {
+    const { uploadId } = req.body as { uploadId: string };
+    const partIndex = parseInt(req.body?.partIndex ?? "", 10);
+
+    if (!uploadId || isNaN(partIndex) || partIndex < 0) {
+      res.status(400).json({ error: "Invalid uploadId or partIndex" });
+      return;
+    }
+    if (!req.file) {
+      res.status(400).json({ error: "No part data" });
+      return;
+    }
+
+    req.log.info({ uploadId, partIndex, bytes: req.file.size }, "Part received");
+    res.json({ ok: true, partIndex });
+  },
+);
+
+// ── POST /files/upload-finalize ───────────────────────────────────────────────
+// Assembles all parts, verifies SHA-256 against client hash, splits into chunks.
+router.post("/files/upload-finalize", async (req, res): Promise<void> => {
+  const { uploadId, name, size, mimeType, totalParts, sha256, ttl } = req.body as {
+    uploadId: string;
+    name: string;
+    size: number;
+    mimeType: string;
+    totalParts: number;
+    sha256: string;
+    ttl?: string;
+  };
+
+  if (!uploadId || !name || !size || !mimeType || !totalParts || !sha256) {
+    res.status(400).json({ error: "Missing required fields" });
+    return;
+  }
+
+  const tempDir = getUploadTempDir(uploadId);
+  if (!fs.existsSync(tempDir)) {
+    res.status(404).json({ error: "Upload session not found or already finalised" });
+    return;
+  }
+
+  // Verify all parts are present
+  for (let i = 0; i < totalParts; i++) {
+    if (!fs.existsSync(getPartPath(uploadId, i))) {
+      res.status(400).json({ error: `Missing part ${i}` });
+      return;
+    }
+  }
+
+  const fileId = uuidv4();
+
+  try {
+    const chunkCount = assembleAndSplit(uploadId, fileId, totalParts);
+    const baseUrl = getBaseUrl(req);
+
+    // Hash all stored chunks in sequence — this equals SHA-256 of the original file
+    const { createHash } = await import("crypto");
+    const fileHash = createHash("sha256");
+    for (let i = 0; i < chunkCount; i++) {
+      const chunkPath = path.join(uploadsDir, fileId, `chunk_${i}.bin`);
+      fileHash.update(fs.readFileSync(chunkPath));
+    }
+    const serverHash = fileHash.digest("hex");
+
+    if (serverHash !== sha256.toLowerCase()) {
+      // Hash mismatch — delete bad file and report
+      deleteFile(fileId);
+      req.log.warn({ uploadId, fileId, serverHash, clientHash: sha256 }, "SHA-256 mismatch");
+      res.status(409).json({ error: "Integrity check failed: SHA-256 mismatch. Please try uploading again." });
+      return;
+    }
+
+    const ttlKey = typeof ttl === "string" ? ttl : null;
+    let expiresAt: string | undefined;
+    if (ttlKey && TTL_OPTIONS[ttlKey]) {
+      expiresAt = new Date(Date.now() + TTL_OPTIONS[ttlKey]).toISOString();
+    }
+
+    const chunkUrls = buildChunkUrls(fileId, chunkCount, baseUrl);
+    const meta: FileMeta = {
+      id: fileId,
+      name,
+      size: Number(size),
+      mimeType: mimeType || "application/octet-stream",
+      chunkCount,
+      chunkSize: CHUNK_SIZE,
+      uploadedAt: new Date().toISOString(),
+      chunkUrls,
+      sha256: serverHash,
+      ...(expiresAt ? { expiresAt } : {}),
+    };
+
+    saveMeta(meta);
+    req.log.info({ fileId, name, chunkCount, sha256: serverHash }, "Chunked upload finalised");
+    res.status(201).json(meta);
+  } catch (err) {
+    cleanupUpload(uploadId);
+    try { deleteFile(fileId); } catch { /* ignore */ }
+    req.log.error({ err }, "Finalise failed");
+    res.status(500).json({ error: "Failed to assemble file" });
+  }
+});
 
 // ── POST /files/register-seed ────────────────────────────────────────────────
 router.post("/files/register-seed", async (req, res): Promise<void> => {
