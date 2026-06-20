@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { useLocation } from "wouter";
 import {
   UploadCloud, File, AlertCircle, Clock, Zap, Code2,
-  Shield, Radio, Server, Users, Wifi, WifiOff,
+  Shield, Radio, Server, Users, Wifi, WifiOff, X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -24,28 +24,50 @@ const FEATURES = [
 
 const CHUNK_SIZE = 1024 * 1024;
 
-function splitFileIntoChunks(file: File): Promise<ArrayBuffer[]> {
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+/** Parse error message from API JSON response body, fallback to statusText */
+async function parseErrorMessage(res: Response): Promise<string> {
+  try {
+    const json = await res.clone().json() as Record<string, unknown>;
+    if (typeof json.error === "string") return json.error;
+    if (typeof json.message === "string") return json.message;
+  } catch { /* ignore */ }
+  return res.statusText || "An error occurred";
+}
+
+/**
+ * Read file in CHUNK_SIZE slices, reporting progress.
+ * Uses File.slice() + Uint8Array — never loads more than one chunk at a time.
+ */
+function readFileChunks(
+  file: File,
+  onProgress?: (done: number, total: number) => void,
+): Promise<ArrayBuffer[]> {
   return new Promise((resolve, reject) => {
+    const chunkCount = Math.ceil(file.size / CHUNK_SIZE);
     const chunks: ArrayBuffer[] = [];
-    let offset = 0;
-    const reader = new FileReader();
+    let index = 0;
 
     function readNext() {
-      if (offset >= file.size) { resolve(chunks); return; }
-      const slice = file.slice(offset, offset + CHUNK_SIZE);
+      if (index >= chunkCount) { resolve(chunks); return; }
+      const slice = file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE);
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        if (!e.target?.result) { reject(new Error("Failed to read chunk")); return; }
+        chunks.push(e.target.result as ArrayBuffer);
+        index++;
+        onProgress?.(index, chunkCount);
+        readNext();
+      };
+      reader.onerror = () => reject(reader.error);
       reader.readAsArrayBuffer(slice);
     }
 
-    reader.onload = (e) => {
-      if (e.target?.result) {
-        chunks.push(e.target.result as ArrayBuffer);
-        offset += CHUNK_SIZE;
-        readNext();
-      } else {
-        reject(new Error("Failed to read chunk"));
-      }
-    };
-    reader.onerror = () => reject(reader.error);
     readNext();
   });
 }
@@ -62,26 +84,50 @@ interface SeederState {
   bytesServed: number;
 }
 
+type UploadStep =
+  | { phase: "idle" }
+  | { phase: "uploading"; progress: number }
+  | { phase: "chunking"; done: number; total: number }
+  | { phase: "connecting" };
+
 export default function UploadPage() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const [dragActive, setDragActive] = useState(false);
   const [file, setFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [uploadStep, setUploadStep] = useState<UploadStep>({ phase: "idle" });
   const [ttl, setTtl] = useState("");
   const [seederState, setSeederState] = useState<SeederState | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const xhrRef = useRef<XMLHttpRequest | null>(null);
   const chunksRef = useRef<ArrayBuffer[]>([]);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const abortRef = useRef(false);
 
   useEffect(() => {
     return () => {
       wsRef.current?.close();
       peersRef.current.forEach((pc) => pc.close());
+      xhrRef.current?.abort();
     };
   }, []);
+
+  const resetState = () => {
+    xhrRef.current?.abort();
+    wsRef.current?.close();
+    peersRef.current.forEach((pc) => pc.close());
+    peersRef.current.clear();
+    chunksRef.current = [];
+    abortRef.current = false;
+    setUploadStep({ phase: "idle" });
+  };
+
+  const cancelUpload = () => {
+    abortRef.current = true;
+    resetState();
+    toast({ title: "Upload cancelled" });
+  };
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -97,54 +143,61 @@ export default function UploadPage() {
     if (e.dataTransfer.files?.[0]) setFile(e.dataTransfer.files[0]);
   }, []);
 
-  const handleUpload = async () => {
+  const isUploading = uploadStep.phase !== "idle";
+
+  // ── Server upload ──────────────────────────────────────────────────────────
+  const handleUpload = () => {
     if (!file) return;
-    setUploading(true);
-    setProgress(0);
+    abortRef.current = false;
+    setUploadStep({ phase: "uploading", progress: 0 });
 
     const formData = new FormData();
     formData.append("file", file);
     if (ttl) formData.append("ttl", ttl);
 
-    try {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/files/upload", true);
+    const xhr = new XMLHttpRequest();
+    xhrRef.current = xhr;
+    xhr.open("POST", "/api/files/upload", true);
 
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) setProgress((e.loaded / e.total) * 100);
-      };
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        setUploadStep({ phase: "uploading", progress: (e.loaded / e.total) * 100 });
+      }
+    };
 
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          const response = JSON.parse(xhr.responseText);
-          toast({ title: "Upload complete", description: "File successfully split and stored." });
-          setLocation(`/files/${response.id}`);
-        } else {
-          toast({ variant: "destructive", title: "Upload failed", description: "An error occurred." });
-          setUploading(false);
-          setProgress(0);
-        }
-      };
+    xhr.onload = () => {
+      if (abortRef.current) return;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const response = JSON.parse(xhr.responseText) as { id: string };
+        toast({ title: "Upload complete", description: "File split and stored successfully." });
+        setLocation(`/files/${response.id}`);
+      } else {
+        let msg = "An error occurred";
+        try { msg = (JSON.parse(xhr.responseText) as { error?: string }).error ?? msg; } catch { /* ignore */ }
+        toast({ variant: "destructive", title: "Upload failed", description: msg });
+        resetState();
+      }
+    };
 
-      xhr.onerror = () => {
-        toast({ variant: "destructive", title: "Upload failed", description: "Network error occurred." });
-        setUploading(false);
-        setProgress(0);
-      };
+    xhr.onerror = () => {
+      if (abortRef.current) return;
+      toast({ variant: "destructive", title: "Upload failed", description: "Network error — check your connection." });
+      resetState();
+    };
 
-      xhr.send(formData);
-    } catch {
-      setUploading(false);
-      setProgress(0);
-    }
+    xhr.onabort = () => { /* handled by cancelUpload */ };
+
+    xhr.send(formData);
   };
 
+  // ── P2P seed ───────────────────────────────────────────────────────────────
   const handleSeed = async () => {
     if (!file) return;
-    setUploading(true);
-    setProgress(10);
+    abortRef.current = false;
 
     try {
+      // 1. Register seed with API
+      setUploadStep({ phase: "connecting" });
       const chunkCount = Math.ceil(file.size / CHUNK_SIZE);
 
       const res = await fetch("/api/files/register-seed", {
@@ -158,15 +211,27 @@ export default function UploadPage() {
         }),
       });
 
-      if (!res.ok) throw new Error("Failed to register seed");
+      if (!res.ok) {
+        const msg = await parseErrorMessage(res);
+        throw new Error(msg);
+      }
+      if (abortRef.current) return;
+
       const meta = await res.json() as { id: string };
       const fileId = meta.id;
 
-      setProgress(30);
-      const chunks = await splitFileIntoChunks(file);
+      // 2. Read file into chunks — show real progress
+      setUploadStep({ phase: "chunking", done: 0, total: chunkCount });
+      const chunks = await readFileChunks(file, (done, total) => {
+        if (!abortRef.current) {
+          setUploadStep({ phase: "chunking", done, total });
+        }
+      });
+      if (abortRef.current) return;
       chunksRef.current = chunks;
-      setProgress(80);
 
+      // 3. Connect WebSocket and start seeding
+      setUploadStep({ phase: "connecting" });
       const proto = window.location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
       wsRef.current = ws;
@@ -176,10 +241,11 @@ export default function UploadPage() {
       };
 
       ws.onmessage = async (event) => {
+        if (abortRef.current) return;
         const msg = JSON.parse(event.data as string) as Record<string, unknown>;
 
         if (msg.type === "seeding") {
-          setProgress(100);
+          setUploadStep({ phase: "idle" });
           setSeederState({
             fileId,
             fileName: file.name,
@@ -189,7 +255,6 @@ export default function UploadPage() {
             status: "seeding",
             bytesServed: 0,
           });
-          setUploading(false);
           toast({ title: "Seeding active", description: "Share the link — peers download directly from your browser." });
         }
 
@@ -202,13 +267,11 @@ export default function UploadPage() {
             ],
           });
           peersRef.current.set(leecherId, pc);
-
           setSeederState((prev) => prev ? { ...prev, connectedPeers: prev.connectedPeers + 1 } : prev);
 
           const dc = pc.createDataChannel("file", { ordered: true });
-
-          const BUFFER_HIGH = 4 * 1024 * 1024; // 4 MB — pause sending above this
-          const BUFFER_LOW  = 1 * 1024 * 1024; // 1 MB — resume when below this
+          const BUFFER_HIGH = 4 * 1024 * 1024;
+          const BUFFER_LOW  = 1 * 1024 * 1024;
           dc.bufferedAmountLowThreshold = BUFFER_LOW;
 
           function waitForDrain(): Promise<void> {
@@ -224,16 +287,14 @@ export default function UploadPage() {
 
           dc.onopen = async () => {
             if (dc.readyState !== "open") return;
-            const header = JSON.stringify({
+            dc.send(JSON.stringify({
               name: file.name,
               size: file.size,
               mimeType: file.type || "application/octet-stream",
               chunkCount: chunksRef.current.length,
-            });
-            dc.send(header);
+            }));
             for (const chunk of chunksRef.current) {
               if (dc.readyState !== "open") break;
-              // Wait for drain if buffer is getting full
               while (dc.bufferedAmount > BUFFER_HIGH) {
                 if (dc.readyState !== "open") break;
                 await waitForDrain();
@@ -255,6 +316,17 @@ export default function UploadPage() {
             pc.close();
           };
 
+          // Queue ICE candidates until after setRemoteDescription
+          const pendingCandidates: RTCIceCandidateInit[] = [];
+          let remoteSet = false;
+
+          const flushCandidates = async () => {
+            for (const c of pendingCandidates) {
+              try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { /* ignore */ }
+            }
+            pendingCandidates.length = 0;
+          };
+
           pc.onicecandidate = (e) => {
             if (e.candidate) {
               ws.send(JSON.stringify({ type: "ice", to: leecherId, candidate: e.candidate }));
@@ -274,27 +346,44 @@ export default function UploadPage() {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
           ws.send(JSON.stringify({ type: "offer", to: leecherId, sdp: pc.localDescription }));
-        }
 
-        if (msg.type === "answer") {
-          const pc = peersRef.current.get(msg.from as string);
-          if (pc) await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+          // Attach answer handler via message filtering
+          const origOnmessage = ws.onmessage;
+          ws.addEventListener("message", async (ev: MessageEvent) => {
+            const m = JSON.parse(ev.data as string) as Record<string, unknown>;
+            if (m.type === "answer" && m.from === leecherId) {
+              await pc.setRemoteDescription(new RTCSessionDescription(m.sdp as RTCSessionDescriptionInit));
+              remoteSet = true;
+              await flushCandidates();
+            }
+            if (m.type === "ice" && m.from === leecherId) {
+              if (remoteSet) {
+                try { await pc.addIceCandidate(new RTCIceCandidate(m.candidate as RTCIceCandidateInit)); } catch { /* ignore */ }
+              } else {
+                pendingCandidates.push(m.candidate as RTCIceCandidateInit);
+              }
+            }
+          });
+          void origOnmessage;
         }
+      };
 
-        if (msg.type === "ice") {
-          const pc = peersRef.current.get(msg.from as string);
-          if (pc && msg.candidate) await pc.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
+      ws.onerror = () => {
+        if (!abortRef.current) {
+          toast({ variant: "destructive", title: "WebSocket error", description: "Could not connect to signaling server." });
+          resetState();
         }
       };
 
       ws.onclose = () => {
         setSeederState((prev) => prev ? { ...prev, status: "offline" } : prev);
       };
+
     } catch (err) {
-      console.error(err);
-      toast({ variant: "destructive", title: "Seed failed", description: "Could not start seeding." });
-      setUploading(false);
-      setProgress(0);
+      if (abortRef.current) return;
+      const msg = err instanceof Error ? err.message : "Could not start seeding";
+      toast({ variant: "destructive", title: "Seed failed", description: msg });
+      resetState();
     }
   };
 
@@ -305,12 +394,13 @@ export default function UploadPage() {
     setSeederState(null);
     setFile(null);
     chunksRef.current = [];
+    abortRef.current = false;
   };
 
+  // ── Seeder active view ──────────────────────────────────────────────────────
   if (seederState) {
     const shareUrl = `${window.location.origin}/files/${seederState.fileId}`;
     const isOnline = seederState.status === "seeding";
-    const mb = (seederState.bytesServed / 1024 / 1024).toFixed(2);
 
     return (
       <div className="max-w-2xl mx-auto space-y-6 mt-8">
@@ -321,7 +411,7 @@ export default function UploadPage() {
           </div>
           <h1 className="text-3xl font-bold font-mono gradient-text">{seederState.fileName}</h1>
           <p className="text-muted-foreground text-sm">
-            {(seederState.fileSize / 1024 / 1024).toFixed(2)} MB · {seederState.chunkCount} chunks
+            {formatBytes(seederState.fileSize)} · {seederState.chunkCount} chunks
           </p>
         </div>
 
@@ -333,7 +423,7 @@ export default function UploadPage() {
           </div>
           <div className="p-4 rounded-xl border border-border/60 bg-card/60 text-center">
             <Radio className="w-5 h-5 text-primary mx-auto mb-1" />
-            <p className="text-2xl font-bold font-mono text-foreground">{mb} MB</p>
+            <p className="text-2xl font-bold font-mono text-foreground">{formatBytes(seederState.bytesServed)}</p>
             <p className="text-xs text-muted-foreground">Data served</p>
           </div>
         </div>
@@ -362,6 +452,22 @@ export default function UploadPage() {
     );
   }
 
+  // ── Upload progress label ───────────────────────────────────────────────────
+  const progressLabel = (() => {
+    if (uploadStep.phase === "uploading") return `Uploading… ${Math.round(uploadStep.progress)}%`;
+    if (uploadStep.phase === "chunking")  return `Splitting… ${uploadStep.done}/${uploadStep.total} chunks`;
+    if (uploadStep.phase === "connecting") return "Connecting…";
+    return "Processing…";
+  })();
+
+  const progressValue = (() => {
+    if (uploadStep.phase === "uploading") return uploadStep.progress;
+    if (uploadStep.phase === "chunking")  return (uploadStep.done / Math.max(1, uploadStep.total)) * 100;
+    if (uploadStep.phase === "connecting") return 99;
+    return 0;
+  })();
+
+  // ── Main view ───────────────────────────────────────────────────────────────
   return (
     <div className="max-w-2xl mx-auto space-y-10 mt-8">
       <div className="space-y-4 text-center">
@@ -378,18 +484,18 @@ export default function UploadPage() {
       </div>
 
       <div
-        className={`relative rounded-xl border-2 border-dashed transition-all duration-200 cursor-pointer overflow-hidden
+        className={`relative rounded-xl border-2 border-dashed transition-all duration-200 overflow-hidden
           ${dragActive
             ? "border-primary/70 bg-primary/5 dropzone-active"
             : file
-              ? "border-primary/30 bg-card"
-              : "border-border hover:border-primary/30 hover:bg-muted/20 bg-card"
+              ? "border-primary/30 bg-card cursor-default"
+              : "border-border hover:border-primary/30 hover:bg-muted/20 bg-card cursor-pointer"
           }`}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
         onDrop={handleDrop}
-        onClick={() => !uploading && !file && inputRef.current?.click()}
+        onClick={() => !isUploading && !file && inputRef.current?.click()}
       >
         <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-primary/40 rounded-tl-xl" />
         <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-primary/40 rounded-tr-xl" />
@@ -401,22 +507,33 @@ export default function UploadPage() {
           ref={inputRef}
           className="hidden"
           onChange={(e) => { if (e.target.files?.[0]) setFile(e.target.files[0]); }}
-          disabled={uploading}
+          disabled={isUploading}
         />
 
         <div className="p-14 text-center">
-          {uploading ? (
+          {isUploading ? (
             <div className="space-y-6 max-w-sm mx-auto">
               <div className="w-16 h-16 mx-auto rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center glow-cyan-sm">
                 <UploadCloud className="w-8 h-8 text-primary animate-pulse" />
               </div>
               <div className="space-y-3">
                 <div className="flex justify-between text-sm font-mono text-muted-foreground">
-                  <span>Processing...</span>
-                  <span className="text-primary">{Math.round(progress)}%</span>
+                  <span>{progressLabel}</span>
+                  <span className="text-primary">{Math.round(progressValue)}%</span>
                 </div>
-                <Progress value={progress} className="h-1.5" />
+                <Progress value={progressValue} className="h-1.5" />
+                {file && (
+                  <p className="text-xs text-muted-foreground/60 font-mono">{file.name} · {formatBytes(file.size)}</p>
+                )}
               </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-xs font-mono text-muted-foreground gap-1.5"
+                onClick={cancelUpload}
+              >
+                <X className="w-3.5 h-3.5" /> Cancel
+              </Button>
             </div>
           ) : file ? (
             <div className="space-y-5">
@@ -425,7 +542,7 @@ export default function UploadPage() {
               </div>
               <div className="space-y-1">
                 <p className="font-mono text-base font-bold text-foreground">{file.name}</p>
-                <p className="text-sm text-muted-foreground">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
+                <p className="text-sm text-muted-foreground">{formatBytes(file.size)}</p>
               </div>
 
               <div className="flex flex-col items-center gap-4" onClick={(e) => e.stopPropagation()}>
