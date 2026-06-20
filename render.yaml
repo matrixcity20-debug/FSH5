@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: filesplit
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: node dist/server/index.mjs
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        generateValue: false
+        value: 10000
+      - key: UPLOAD_DIR
+        value: uploads
+      - key: MAX_FILE_SIZE_MB
+        value: "500"
+      - key: CHUNK_SIZE_MB
+        value: "1"
+    disk:
+      name: uploads
+      mountPath: /opt/render/project/src/uploads
+      sizeGB: 1

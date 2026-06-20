@@ -1,0 +1,27 @@
+app = "filesplit"
+primary_region = "ams"
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+  UPLOAD_DIR = "/data/uploads"
+  MAX_FILE_SIZE_MB = "500"
+  CHUNK_SIZE_MB = "1"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[mounts]]
+  source = "uploads_data"
+  destination = "/data/uploads"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
