@@ -1,22 +1,19 @@
 services:
   - type: web
     name: filesplit
-    runtime: node
-    buildCommand: npm install && npm run build
-    startCommand: node dist/server/index.mjs
+    env: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: node dist/server/index.js
+    healthCheckPath: /api/healthz
     envVars:
       - key: NODE_ENV
         value: production
+      - key: SESSION_SECRET
+        generateValue: true
       - key: PORT
-        generateValue: false
-        value: 10000
-      - key: UPLOAD_DIR
-        value: uploads
-      - key: MAX_FILE_SIZE_MB
-        value: "500"
-      - key: CHUNK_SIZE_MB
-        value: "1"
+        value: "5000"
     disk:
       name: uploads
-      mountPath: /opt/render/project/src/uploads
+      mountPath: /uploads
       sizeGB: 1

@@ -5,22 +5,21 @@ import path from "path";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  root: path.resolve(import.meta.dirname, "client"),
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "client/src"),
     },
   },
+  root: path.resolve(import.meta.dirname, "client"),
   build: {
-    outDir: path.resolve(import.meta.dirname, "dist/client"),
+    outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
   },
   server: {
     port: 5173,
-    host: "0.0.0.0",
     proxy: {
-      "/api": "http://localhost:4000",
-      "/ws": { target: "ws://localhost:4000", ws: true },
+      "/api": "http://localhost:5000",
+      "/ws": { target: "ws://localhost:5000", ws: true, changeOrigin: true },
     },
   },
 });

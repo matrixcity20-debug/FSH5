@@ -6,20 +6,20 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { useToast } from "@/hooks/use-toast";
+import { toast } from "@/hooks/use-toast";
 
 const TTL_OPTIONS = [
-  { value: "", label: "Never expire" },
-  { value: "1h", label: "1 hour" },
-  { value: "24h", label: "24 hours" },
-  { value: "7d", label: "7 days" },
-  { value: "30d", label: "30 days" },
+  { value: "", label: "Hiç dolmasın" },
+  { value: "1h", label: "1 saat" },
+  { value: "24h", label: "24 saat" },
+  { value: "7d", label: "7 gün" },
+  { value: "30d", label: "30 gün" },
 ];
 
 const FEATURES = [
-  { icon: Zap, title: "Instant splitting", desc: "Files split into 1 MB chunks automatically" },
-  { icon: Code2, title: "Zero-dependency embed", desc: "Drop a JS snippet anywhere to add a download button" },
-  { icon: Shield, title: "Auto-expiry", desc: "Set a TTL and files delete themselves" },
+  { icon: Zap, title: "Anında bölme", desc: "Dosyalar otomatik olarak 1 MB parçalara bölünür" },
+  { icon: Code2, title: "Sıfır bağımlılıklı embed", desc: "JS snippet'ini yapıştırarak indirme butonu ekleyin" },
+  { icon: Shield, title: "Otomatik silme", desc: "TTL belirleyin, süresi dolan dosyalar silinir" },
 ];
 
 const CHUNK_SIZE = 1024 * 1024;
@@ -36,7 +36,7 @@ async function parseErrorMessage(res: Response): Promise<string> {
     if (typeof json.error === "string") return json.error;
     if (typeof json.message === "string") return json.message;
   } catch { /* ignore */ }
-  return res.statusText || "An error occurred";
+  return res.statusText || "Bir hata oluştu";
 }
 
 function readFileChunks(
@@ -53,7 +53,7 @@ function readFileChunks(
       const slice = file.slice(index * CHUNK_SIZE, (index + 1) * CHUNK_SIZE);
       const reader = new FileReader();
       reader.onload = (e) => {
-        if (!e.target?.result) { reject(new Error("Failed to read chunk")); return; }
+        if (!e.target?.result) { reject(new Error("Chunk okunamadı")); return; }
         chunks.push(e.target.result as ArrayBuffer);
         index++;
         onProgress?.(index, chunkCount);
@@ -95,7 +95,6 @@ type UploadStep =
 
 export default function UploadPage() {
   const [, setLocation] = useLocation();
-  const { toast } = useToast();
 
   const [dragActive, setDragActive] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -110,13 +109,12 @@ export default function UploadPage() {
   const [selectedFolderId, setSelectedFolderId] = useState<string>("");
   const inputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const xhrRef = useRef<XMLHttpRequest | null>(null);
   const chunksRef = useRef<ArrayBuffer[]>([]);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const abortRef = useRef(false);
 
   useEffect(() => {
-    fetch("/api/folders")
+    fetch("/api/folders", { credentials: "include" })
       .then((r) => r.ok ? r.json() as Promise<FolderMeta[]> : [])
       .then(setFolders)
       .catch(() => setFolders([]));
@@ -131,18 +129,18 @@ export default function UploadPage() {
   const lookupParent = async (raw: string) => {
     const id = extractFileId(raw);
     if (!id) {
-      toast({ variant: "destructive", title: "Invalid URL / ID" });
+      toast({ variant: "destructive", title: "Geçersiz URL / ID" });
       return;
     }
     setVersionLookupLoading(true);
     try {
-      const res = await fetch(`/api/files/${id}`);
-      if (!res.ok) throw new Error("File not found");
+      const res = await fetch(`/api/files/${id}`, { credentials: "include" });
+      if (!res.ok) throw new Error("Dosya bulunamadı");
       const meta = await res.json() as { id: string; name: string };
       setParentFileId(meta.id);
       setParentFileName(meta.name);
     } catch {
-      toast({ variant: "destructive", title: "File not found", description: "Check the URL and try again." });
+      toast({ variant: "destructive", title: "Dosya bulunamadı", description: "URL'yi kontrol edip tekrar deneyin." });
       setParentFileId(null);
       setParentFileName(null);
     } finally {
@@ -163,12 +161,10 @@ export default function UploadPage() {
     return () => {
       wsRef.current?.close();
       peersRef.current.forEach((pc) => pc.close());
-      xhrRef.current?.abort();
     };
   }, []);
 
   const resetState = () => {
-    xhrRef.current?.abort();
     wsRef.current?.close();
     peersRef.current.forEach((pc) => pc.close());
     peersRef.current.clear();
@@ -180,7 +176,7 @@ export default function UploadPage() {
   const cancelUpload = () => {
     abortRef.current = true;
     resetState();
-    toast({ title: "Upload cancelled" });
+    toast({ title: "Yükleme iptal edildi" });
   };
 
   const handleDrag = useCallback((e: React.DragEvent) => {
@@ -202,7 +198,6 @@ export default function UploadPage() {
   const handleUpload = async () => {
     if (!file) return;
     abortRef.current = false;
-
     const PART_SIZE = 5 * 1024 * 1024;
 
     try {
@@ -217,17 +212,11 @@ export default function UploadPage() {
       const initRes = await fetch("/api/files/upload-init", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: file.name,
-          size: file.size,
-          mimeType: file.type || "application/octet-stream",
-        }),
+        credentials: "include",
+        body: JSON.stringify({ name: file.name, size: file.size, mimeType: file.type || "application/octet-stream" }),
       });
       if (abortRef.current) return;
-      if (!initRes.ok) {
-        const msg = await parseErrorMessage(initRes);
-        throw new Error(msg);
-      }
+      if (!initRes.ok) throw new Error(await parseErrorMessage(initRes));
       const { uploadId } = await initRes.json() as { uploadId: string };
 
       const totalParts = Math.ceil(file.size / PART_SIZE);
@@ -242,15 +231,9 @@ export default function UploadPage() {
         fd.append("partIndex", String(i));
         fd.append("part", slice, file.name);
 
-        const partRes = await fetch("/api/files/upload-part", {
-          method: "POST",
-          body: fd,
-        });
+        const partRes = await fetch("/api/files/upload-part", { method: "POST", credentials: "include", body: fd });
         if (abortRef.current) return;
-        if (!partRes.ok) {
-          const msg = await parseErrorMessage(partRes);
-          throw new Error(`Part ${i} failed: ${msg}`);
-        }
+        if (!partRes.ok) throw new Error(`Part ${i} başarısız: ${await parseErrorMessage(partRes)}`);
 
         bytesDone += slice.size;
         setUploadStep({ phase: "uploading", done: bytesDone, total: file.size });
@@ -262,6 +245,7 @@ export default function UploadPage() {
       const finalRes = await fetch("/api/files/upload-finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           uploadId,
           name: file.name,
@@ -275,19 +259,15 @@ export default function UploadPage() {
         }),
       });
       if (abortRef.current) return;
-      if (!finalRes.ok) {
-        const msg = await parseErrorMessage(finalRes);
-        throw new Error(msg);
-      }
+      if (!finalRes.ok) throw new Error(await parseErrorMessage(finalRes));
 
       const meta = await finalRes.json() as { id: string };
-      toast({ title: "Upload complete ✓", description: "Integrity verified — file split and stored successfully." });
+      toast({ title: "Yükleme tamamlandı ✓", description: "Dosya başarıyla bölündü ve saklandı." });
       setLocation(`/files/${meta.id}`);
 
     } catch (err) {
       if (abortRef.current) return;
-      const msg = err instanceof Error ? err.message : "An error occurred";
-      toast({ variant: "destructive", title: "Upload failed", description: msg });
+      toast({ variant: "destructive", title: "Yükleme başarısız", description: err instanceof Error ? err.message : "Bir hata oluştu" });
       resetState();
     }
   };
@@ -303,6 +283,7 @@ export default function UploadPage() {
       const res = await fetch("/api/files/register-seed", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
           name: file.name,
           size: file.size,
@@ -312,10 +293,7 @@ export default function UploadPage() {
         }),
       });
 
-      if (!res.ok) {
-        const msg = await parseErrorMessage(res);
-        throw new Error(msg);
-      }
+      if (!res.ok) throw new Error(await parseErrorMessage(res));
       if (abortRef.current) return;
 
       const meta = await res.json() as { id: string };
@@ -323,9 +301,7 @@ export default function UploadPage() {
 
       setUploadStep({ phase: "chunking", done: 0, total: chunkCount });
       const chunks = await readFileChunks(file, (done, total) => {
-        if (!abortRef.current) {
-          setUploadStep({ phase: "chunking", done, total });
-        }
+        if (!abortRef.current) setUploadStep({ phase: "chunking", done, total });
       });
       if (abortRef.current) return;
       chunksRef.current = chunks;
@@ -335,9 +311,7 @@ export default function UploadPage() {
       const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
       wsRef.current = ws;
 
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "seed", fileId }));
-      };
+      ws.onopen = () => ws.send(JSON.stringify({ type: "seed", fileId }));
 
       ws.onmessage = async (event) => {
         if (abortRef.current) return;
@@ -345,32 +319,19 @@ export default function UploadPage() {
 
         if (msg.type === "seeding") {
           setUploadStep({ phase: "idle" });
-          setSeederState({
-            fileId,
-            fileName: file.name,
-            fileSize: file.size,
-            chunkCount,
-            connectedPeers: 0,
-            status: "seeding",
-            bytesServed: 0,
-          });
-          toast({ title: "Seeding active", description: "Share the link — peers download directly from your browser." });
+          setSeederState({ fileId, fileName: file.name, fileSize: file.size, chunkCount, connectedPeers: 0, status: "seeding", bytesServed: 0 });
+          toast({ title: "Seeding aktif", description: "Linki paylaşın — kullanıcılar doğrudan tarayıcınızdan indirir." });
         }
 
         if (msg.type === "peer-joined") {
           const leecherId = msg.leecherId as string;
-          const pc = new RTCPeerConnection({
-            iceServers: [
-              { urls: "stun:stun.l.google.com:19302" },
-              { urls: "stun:stun1.l.google.com:19302" },
-            ],
-          });
+          const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
           peersRef.current.set(leecherId, pc);
           setSeederState((prev) => prev ? { ...prev, connectedPeers: prev.connectedPeers + 1 } : prev);
 
           const dc = pc.createDataChannel("file", { ordered: true });
           const BUFFER_HIGH = 4 * 1024 * 1024;
-          const BUFFER_LOW  = 1 * 1024 * 1024;
+          const BUFFER_LOW = 1 * 1024 * 1024;
           dc.bufferedAmountLowThreshold = BUFFER_LOW;
 
           function waitForDrain(): Promise<void> {
@@ -386,12 +347,7 @@ export default function UploadPage() {
 
           dc.onopen = async () => {
             if (dc.readyState !== "open") return;
-            dc.send(JSON.stringify({
-              name: file.name,
-              size: file.size,
-              mimeType: file.type || "application/octet-stream",
-              chunkCount: chunksRef.current.length,
-            }));
+            dc.send(JSON.stringify({ name: file.name, size: file.size, mimeType: file.type || "application/octet-stream", chunkCount: chunksRef.current.length }));
             for (const chunk of chunksRef.current) {
               if (dc.readyState !== "open") break;
               while (dc.bufferedAmount > BUFFER_HIGH) {
@@ -400,17 +356,13 @@ export default function UploadPage() {
               }
               if (dc.readyState !== "open") break;
               dc.send(chunk);
-              setSeederState((prev) =>
-                prev ? { ...prev, bytesServed: prev.bytesServed + chunk.byteLength } : prev
-              );
+              setSeederState((prev) => prev ? { ...prev, bytesServed: prev.bytesServed + chunk.byteLength } : prev);
             }
             if (dc.readyState === "open") dc.send("__DONE__");
           };
 
           dc.onclose = () => {
-            setSeederState((prev) =>
-              prev ? { ...prev, connectedPeers: Math.max(0, prev.connectedPeers - 1) } : prev
-            );
+            setSeederState((prev) => prev ? { ...prev, connectedPeers: Math.max(0, prev.connectedPeers - 1) } : prev);
             peersRef.current.delete(leecherId);
             pc.close();
           };
@@ -418,40 +370,23 @@ export default function UploadPage() {
           const pendingCandidates: RTCIceCandidateInit[] = [];
           let remoteSet = false;
 
-          const flushCandidates = async () => {
-            for (const c of pendingCandidates) {
-              try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { /* ignore */ }
-            }
-            pendingCandidates.length = 0;
-          };
-
           pc.onicecandidate = (e) => {
-            if (e.candidate) {
-              ws.send(JSON.stringify({ type: "ice", to: leecherId, candidate: e.candidate }));
-            }
-          };
-
-          pc.onconnectionstatechange = () => {
-            if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-              setSeederState((prev) =>
-                prev ? { ...prev, connectedPeers: Math.max(0, prev.connectedPeers - 1) } : prev
-              );
-              peersRef.current.delete(leecherId);
-              pc.close();
-            }
+            if (e.candidate) ws.send(JSON.stringify({ type: "ice", to: leecherId, candidate: e.candidate }));
           };
 
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
           ws.send(JSON.stringify({ type: "offer", to: leecherId, sdp: pc.localDescription }));
 
-          const origOnmessage = ws.onmessage;
           ws.addEventListener("message", async (ev: MessageEvent) => {
             const m = JSON.parse(ev.data as string) as Record<string, unknown>;
             if (m.type === "answer" && m.from === leecherId) {
               await pc.setRemoteDescription(new RTCSessionDescription(m.sdp as RTCSessionDescriptionInit));
               remoteSet = true;
-              await flushCandidates();
+              for (const c of pendingCandidates) {
+                try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch { /* ignore */ }
+              }
+              pendingCandidates.length = 0;
             }
             if (m.type === "ice" && m.from === leecherId) {
               if (remoteSet) {
@@ -461,25 +396,20 @@ export default function UploadPage() {
               }
             }
           });
-          void origOnmessage;
         }
       };
 
       ws.onerror = () => {
         if (!abortRef.current) {
-          toast({ variant: "destructive", title: "WebSocket error", description: "Could not connect to signaling server." });
+          toast({ variant: "destructive", title: "WebSocket hatası", description: "Sinyal sunucusuna bağlanılamadı." });
           resetState();
         }
       };
-
-      ws.onclose = () => {
-        setSeederState((prev) => prev ? { ...prev, status: "offline" } : prev);
-      };
+      ws.onclose = () => setSeederState((prev) => prev ? { ...prev, status: "offline" } : prev);
 
     } catch (err) {
       if (abortRef.current) return;
-      const msg = err instanceof Error ? err.message : "Could not start seeding";
-      toast({ variant: "destructive", title: "Seed failed", description: msg });
+      toast({ variant: "destructive", title: "Seed başarısız", description: err instanceof Error ? err.message : "Başlatılamadı" });
       resetState();
     }
   };
@@ -495,7 +425,7 @@ export default function UploadPage() {
   };
 
   if (seederState) {
-    const shareUrl = `${window.location.origin}/files/${seederState.fileId}`;
+    const shareUrl = `${window.location.origin}/filesplit/files/${seederState.fileId}`;
     const isOnline = seederState.status === "seeding";
 
     return (
@@ -503,65 +433,54 @@ export default function UploadPage() {
         <div className="text-center space-y-2">
           <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full border text-xs font-mono mb-2 ${isOnline ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400" : "border-red-500/30 bg-red-500/10 text-red-400"}`}>
             {isOnline ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
-            {isOnline ? "Seeding active" : "Seeder offline"}
+            {isOnline ? "Seeding aktif" : "Seeder çevrimdışı"}
           </div>
           <h1 className="text-3xl font-bold font-mono gradient-text">{seederState.fileName}</h1>
-          <p className="text-muted-foreground text-sm">
-            {formatBytes(seederState.fileSize)} · {seederState.chunkCount} chunks
-          </p>
+          <p className="text-muted-foreground text-sm">{formatBytes(seederState.fileSize)} · {seederState.chunkCount} parça</p>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
           <div className="p-4 rounded-xl border border-border/60 bg-card/60 text-center">
             <Users className="w-5 h-5 text-primary mx-auto mb-1" />
             <p className="text-2xl font-bold font-mono text-foreground">{seederState.connectedPeers}</p>
-            <p className="text-xs text-muted-foreground">Active peers</p>
+            <p className="text-xs text-muted-foreground">Aktif peer</p>
           </div>
           <div className="p-4 rounded-xl border border-border/60 bg-card/60 text-center">
             <Radio className="w-5 h-5 text-primary mx-auto mb-1" />
             <p className="text-2xl font-bold font-mono text-foreground">{formatBytes(seederState.bytesServed)}</p>
-            <p className="text-xs text-muted-foreground">Data served</p>
+            <p className="text-xs text-muted-foreground">İletilen veri</p>
           </div>
         </div>
 
         <div className="p-4 rounded-xl border border-primary/20 bg-primary/5 space-y-3">
-          <p className="text-xs text-muted-foreground font-mono uppercase tracking-wider">Share link</p>
+          <p className="text-xs text-muted-foreground font-mono uppercase tracking-wider">Paylaşım linki</p>
           <code className="text-xs font-mono text-primary break-all">{shareUrl}</code>
-          <Button
-            size="sm"
-            className="w-full text-xs font-mono"
-            onClick={() => navigator.clipboard.writeText(shareUrl).then(() => toast({ title: "Copied!" }))}
-          >
-            Copy Share Link
+          <Button size="sm" className="w-full text-xs font-mono" onClick={() => navigator.clipboard.writeText(shareUrl).then(() => toast({ title: "Kopyalandı!" }))}>
+            Linki Kopyala
           </Button>
         </div>
 
-        <div className="p-3 rounded-lg border border-amber-500/20 bg-amber-500/5 flex gap-2">
-          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-          <p className="text-xs text-amber-400/80">Keep this tab open while seeding. Closing it will disconnect all peers.</p>
-        </div>
-
         <Button variant="destructive" className="w-full text-xs font-mono" onClick={stopSeeding}>
-          Stop Seeding
+          Seeding'i Durdur
         </Button>
       </div>
     );
   }
 
   const progressLabel = (() => {
-    if (uploadStep.phase === "hashing")    return "Computing hash…";
-    if (uploadStep.phase === "uploading")  return `Uploading… ${formatBytes(uploadStep.done)} / ${formatBytes(uploadStep.total)}`;
-    if (uploadStep.phase === "finalizing") return "Assembling & verifying integrity…";
-    if (uploadStep.phase === "chunking")   return `Splitting… ${uploadStep.done}/${uploadStep.total} chunks`;
-    if (uploadStep.phase === "connecting") return "Connecting…";
-    return "Processing…";
+    if (uploadStep.phase === "hashing") return "Hash hesaplanıyor…";
+    if (uploadStep.phase === "uploading") return `Yükleniyor… ${formatBytes(uploadStep.done)} / ${formatBytes(uploadStep.total)}`;
+    if (uploadStep.phase === "finalizing") return "Birleştiriliyor ve doğrulanıyor…";
+    if (uploadStep.phase === "chunking") return `Bölünüyor… ${uploadStep.done}/${uploadStep.total} parça`;
+    if (uploadStep.phase === "connecting") return "Bağlanıyor…";
+    return "İşleniyor…";
   })();
 
   const progressValue = (() => {
-    if (uploadStep.phase === "hashing")    return 2;
-    if (uploadStep.phase === "uploading")  return 5 + (uploadStep.done / Math.max(1, uploadStep.total)) * 88;
+    if (uploadStep.phase === "hashing") return 2;
+    if (uploadStep.phase === "uploading") return 5 + (uploadStep.done / Math.max(1, uploadStep.total)) * 88;
     if (uploadStep.phase === "finalizing") return 96;
-    if (uploadStep.phase === "chunking")   return (uploadStep.done / Math.max(1, uploadStep.total)) * 100;
+    if (uploadStep.phase === "chunking") return (uploadStep.done / Math.max(1, uploadStep.total)) * 100;
     if (uploadStep.phase === "connecting") return 99;
     return 0;
   })();
@@ -571,47 +490,28 @@ export default function UploadPage() {
       <div className="space-y-4 text-center">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-primary/20 bg-primary/5 text-primary text-xs font-mono mb-2">
           <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-          Ready to split
+          Hazır
         </div>
         <h1 className="text-5xl font-bold font-mono tracking-tight gradient-text leading-tight">
-          Split. Embed.<br />Distribute.
+          Böl. Göm.<br />Dağıt.
         </h1>
         <p className="text-muted-foreground max-w-md mx-auto text-sm leading-relaxed">
-          Upload any file to automatically split it into optimized chunks and generate a zero-dependency JS download embed.
+          Herhangi bir dosyayı yükleyin — otomatik olarak parçalara bölünsün ve sıfır bağımlılıklı bir JS embed oluşturulsun.
         </p>
       </div>
 
       <div
         className={`relative rounded-xl border-2 border-dashed transition-all duration-200 overflow-hidden
-          ${dragActive
-            ? "border-primary/70 bg-primary/5 dropzone-active"
-            : file
-              ? "border-primary/30 bg-card cursor-default"
-              : "border-border hover:border-primary/30 hover:bg-muted/20 bg-card cursor-pointer"
-          }`}
-        onDragEnter={handleDrag}
-        onDragLeave={handleDrag}
-        onDragOver={handleDrag}
-        onDrop={handleDrop}
+          ${dragActive ? "border-primary/70 bg-primary/5 dropzone-active" : file ? "border-primary/30 bg-card cursor-default" : "border-border hover:border-primary/30 hover:bg-muted/20 bg-card cursor-pointer"}`}
+        onDragEnter={handleDrag} onDragLeave={handleDrag} onDragOver={handleDrag} onDrop={handleDrop}
         onClick={() => !isUploading && !file && inputRef.current?.click()}
       >
-        <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-primary/40 rounded-tl-xl" />
-        <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-primary/40 rounded-tr-xl" />
-        <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-primary/40 rounded-bl-xl" />
-        <div className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-primary/40 rounded-br-xl" />
-
-        <input
-          type="file"
-          ref={inputRef}
-          className="hidden"
-          onChange={(e) => { if (e.target.files?.[0]) setFile(e.target.files[0]); }}
-          disabled={isUploading}
-        />
+        <input type="file" ref={inputRef} className="hidden" onChange={(e) => { if (e.target.files?.[0]) setFile(e.target.files[0]); }} disabled={isUploading} />
 
         <div className="p-14 text-center">
           {isUploading ? (
             <div className="space-y-6 max-w-sm mx-auto">
-              <div className="w-16 h-16 mx-auto rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center glow-cyan-sm">
+              <div className="w-16 h-16 mx-auto rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center">
                 <UploadCloud className="w-8 h-8 text-primary animate-pulse" />
               </div>
               <div className="space-y-3">
@@ -620,17 +520,9 @@ export default function UploadPage() {
                   <span className="text-primary">{Math.round(progressValue)}%</span>
                 </div>
                 <Progress value={progressValue} className="h-1.5" />
-                {file && (
-                  <p className="text-xs text-muted-foreground/60 font-mono">{file.name} · {formatBytes(file.size)}</p>
-                )}
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-xs font-mono text-muted-foreground gap-1.5"
-                onClick={cancelUpload}
-              >
-                <X className="w-3.5 h-3.5" /> Cancel
+              <Button variant="ghost" size="sm" className="text-xs font-mono gap-1.5" onClick={cancelUpload}>
+                <X className="w-3.5 h-3.5" /> İptal
               </Button>
             </div>
           ) : file ? (
@@ -638,106 +530,73 @@ export default function UploadPage() {
               <div className="w-16 h-16 mx-auto rounded-full bg-primary/10 border border-primary/30 flex items-center justify-center">
                 <File className="w-8 h-8 text-primary" />
               </div>
-              <div className="space-y-1">
+              <div>
                 <p className="font-mono text-base font-bold text-foreground">{file.name}</p>
                 <p className="text-sm text-muted-foreground">{formatBytes(file.size)}</p>
               </div>
 
               <div className="flex flex-col items-center gap-4 w-full max-w-xs mx-auto" onClick={(e) => e.stopPropagation()}>
-                {/* TTL */}
                 <div className="flex items-center gap-2 bg-muted/50 border border-border rounded-lg px-3 py-2 w-full">
                   <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
-                  <select
-                    value={ttl}
-                    onChange={(e) => setTtl(e.target.value)}
-                    className="bg-transparent text-sm font-mono text-foreground focus:outline-none w-full"
-                  >
-                    {TTL_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value} className="bg-card">{opt.label}</option>
-                    ))}
+                  <select value={ttl} onChange={(e) => setTtl(e.target.value)} className="bg-transparent text-sm font-mono text-foreground focus:outline-none w-full">
+                    {TTL_OPTIONS.map((opt) => <option key={opt.value} value={opt.value} className="bg-card">{opt.label}</option>)}
                   </select>
                 </div>
 
-                {/* Folder selector */}
                 {folders.length > 0 && (
                   <div className="flex items-center gap-2 bg-muted/50 border border-border rounded-lg px-3 py-2 w-full">
                     <Folder className="w-4 h-4 text-muted-foreground shrink-0" />
-                    <select
-                      value={selectedFolderId}
-                      onChange={(e) => setSelectedFolderId(e.target.value)}
-                      className="bg-transparent text-sm font-mono text-foreground focus:outline-none w-full"
-                    >
-                      <option value="" className="bg-card">No folder (root)</option>
-                      {folders.map((f) => (
-                        <option key={f.id} value={f.id} className="bg-card">{f.name}</option>
-                      ))}
+                    <select value={selectedFolderId} onChange={(e) => setSelectedFolderId(e.target.value)} className="bg-transparent text-sm font-mono text-foreground focus:outline-none w-full">
+                      <option value="" className="bg-card">Klasör yok (kök)</option>
+                      {folders.map((f) => <option key={f.id} value={f.id} className="bg-card">{f.name}</option>)}
                     </select>
                   </div>
                 )}
 
-                {/* Versioning */}
                 <div className="w-full space-y-2">
                   <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
                     <GitBranch className="w-3.5 h-3.5" />
-                    <span>Upload as new version of an existing file?</span>
+                    <span>Mevcut bir dosyanın yeni versiyonu mu?</span>
                   </div>
                   {parentFileId ? (
                     <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5">
                       <Link2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                       <span className="text-xs font-mono text-emerald-400 truncate flex-1">{parentFileName}</span>
-                      <button
-                        className="text-muted-foreground hover:text-foreground transition-colors"
-                        onClick={() => { setParentFileId(null); setParentFileName(null); setVersionInput(""); }}
-                      >
-                        <X className="w-3.5 h-3.5" />
+                      <button onClick={() => { setParentFileId(null); setParentFileName(null); setVersionInput(""); }}>
+                        <X className="w-3.5 h-3.5 text-muted-foreground" />
                       </button>
                     </div>
                   ) : (
                     <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={versionInput}
-                        onChange={(e) => setVersionInput(e.target.value)}
-                        placeholder="Paste file URL or ID…"
+                      <input type="text" value={versionInput} onChange={(e) => setVersionInput(e.target.value)}
+                        placeholder="Dosya URL veya ID yapıştırın…"
                         className="flex-1 bg-muted/50 border border-border rounded-lg px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40"
                         onKeyDown={(e) => { if (e.key === "Enter" && versionInput) lookupParent(versionInput); }}
                       />
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="text-xs font-mono px-3"
-                        disabled={!versionInput || versionLookupLoading}
-                        onClick={() => lookupParent(versionInput)}
-                      >
-                        {versionLookupLoading ? "…" : "Link"}
+                      <Button size="sm" variant="outline" className="text-xs font-mono px-3" disabled={!versionInput || versionLookupLoading} onClick={() => lookupParent(versionInput)}>
+                        {versionLookupLoading ? "…" : "Bağla"}
                       </Button>
                     </div>
                   )}
                 </div>
 
-                <p className="text-xs text-muted-foreground font-mono">How do you want to share this file?</p>
+                <p className="text-xs text-muted-foreground font-mono">Nasıl paylaşmak istersiniz?</p>
 
                 <div className="grid grid-cols-2 gap-3 w-full">
-                  <button
-                    onClick={handleUpload}
-                    className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-border hover:border-primary/40 bg-card hover:bg-primary/5 transition-all cursor-pointer"
-                  >
+                  <button onClick={handleUpload} className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-border hover:border-primary/40 bg-card hover:bg-primary/5 transition-all cursor-pointer">
                     <Server className="w-5 h-5 text-muted-foreground" />
-                    <span className="text-xs font-mono font-semibold text-foreground">Store on Server</span>
-                    <span className="text-[10px] text-muted-foreground text-center leading-tight">Upload to server, always available</span>
+                    <span className="text-xs font-mono font-semibold text-foreground">Sunucuda Sakla</span>
+                    <span className="text-[10px] text-muted-foreground text-center">Her zaman erişilebilir</span>
                   </button>
-                  <button
-                    onClick={handleSeed}
-                    className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-primary/40 bg-primary/5 hover:border-primary/70 hover:bg-primary/10 transition-all cursor-pointer"
-                  >
+                  <button onClick={handleSeed} className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-primary/40 bg-primary/5 hover:border-primary/70 hover:bg-primary/10 transition-all cursor-pointer">
                     <Radio className="w-5 h-5 text-primary" />
-                    <span className="text-xs font-mono font-semibold text-primary">Seed from Browser</span>
-                    <span className="text-[10px] text-muted-foreground text-center leading-tight">P2P — tab must stay open</span>
+                    <span className="text-xs font-mono font-semibold text-primary">Tarayıcıdan Seed</span>
+                    <span className="text-[10px] text-muted-foreground text-center">P2P — sekme açık kalmalı</span>
                   </button>
                 </div>
 
                 <Button variant="ghost" size="sm" onClick={() => { setFile(null); setParentFileId(null); setParentFileName(null); setVersionInput(""); }} className="font-mono text-xs text-muted-foreground">
-                  Clear
+                  Temizle
                 </Button>
               </div>
             </div>
@@ -747,8 +606,8 @@ export default function UploadPage() {
                 <UploadCloud className="w-8 h-8 text-muted-foreground" />
               </div>
               <div className="space-y-1.5">
-                <p className="font-semibold text-foreground">Drag & drop a file here</p>
-                <p className="text-sm text-muted-foreground">or click to browse from your computer</p>
+                <p className="font-semibold text-foreground">Dosyayı buraya sürükleyin</p>
+                <p className="text-sm text-muted-foreground">ya da tıklayarak bilgisayarınızdan seçin</p>
               </div>
             </div>
           )}
@@ -757,7 +616,7 @@ export default function UploadPage() {
 
       <div className="flex items-center gap-2 text-xs text-muted-foreground justify-center font-mono">
         <AlertCircle className="w-3.5 h-3.5" />
-        <span>Max file size: 500 MB · Chunks: 1 MB each</span>
+        <span>Maks dosya boyutu: 500 MB · Parça boyutu: 1 MB</span>
       </div>
 
       <div className="grid grid-cols-3 gap-3">

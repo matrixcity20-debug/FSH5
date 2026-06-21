@@ -5,13 +5,8 @@ await esbuild.build({
   bundle: true,
   platform: "node",
   format: "esm",
-  target: "node22",
-  outfile: "dist/server/index.mjs",
-  sourcemap: true,
-  external: ["pino", "pino-pretty", "pino-http", "thread-stream"],
-  banner: {
-    js: `import { createRequire } from 'module'; const require = createRequire(import.meta.url);`,
-  },
+  outfile: "dist/server/index.js",
+  packages: "external",
 });
 
-console.log("Server bundle complete.");
+console.log("✓ Server built → dist/server/index.js");

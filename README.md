@@ -1,76 +1,69 @@
 # FileSplit
 
-Split, embed & distribute files. Upload any file to split it into chunks and generate a zero-dependency JS download embed. Also supports WebRTC P2P seeding directly from the browser.
+Dosya yükleme, parçalama ve dağıtım uygulaması. Kullanıcı kimlik doğrulaması, dosya gizliliği ve WebRTC P2P seeding destekler.
 
-## Quick Start
+## Özellikler
+
+- Kullanıcı kaydı ve girişi (bcrypt + express-session)
+- Her kullanıcı yalnızca kendi dosyalarını görür
+- Dosyaları parçalara bölerek saklama (1 MB chunk)
+- P2P WebRTC seeding — tarayıcıdan doğrudan paylaşım
+- Klasör organizasyonu
+- TTL (otomatik silme: 1s, 24s, 7g, 30g)
+- JS embed snippet ile harici sitelere indirme butonu ekleme
+- SHA-256 bütünlük kontrolü
+
+## Kurulum
 
 ```bash
-npm install          # or pnpm install / yarn install
-cp .env.example .env
+npm install
+```
 
-# Development (runs client + server concurrently)
+Ortam değişkenleri için `.env` dosyası oluştur:
+
+```
+SESSION_SECRET=gizli-anahtar-buraya
+PORT=5000
+NODE_ENV=development
+```
+
+## Geliştirme
+
+```bash
 npm run dev
-
-# Production build + start
-npm run build
-NODE_ENV=production PORT=4000 npm start
 ```
 
-The app runs at:
-- **Dev client**: http://localhost:5173
-- **Dev API / WS**: http://localhost:4000
-- **Production**: everything on the PORT you set (static + API + WS all in one)
+- Frontend: http://localhost:5173
+- Backend API: http://localhost:5000
 
-## Deploy on Render
-
-1. Push this repo to GitHub.
-2. Create a **Web Service** on [render.com](https://render.com) with:
-   - **Build command**: `npm install && npm run build`
-   - **Start command**: `NODE_ENV=production npm start`
-   - **Environment variables**: `PORT=10000`, `NODE_ENV=production`
-3. Done.
-
-## Deploy on Railway / Fly.io
-
-Same as Render — build command then start command.
-
-## Deploy with Docker
+## Production Build
 
 ```bash
-docker build -t filesplit .
-docker run -p 4000:4000 -e NODE_ENV=production filesplit
+npm run build
+npm start
 ```
 
-## Environment Variables
+## Deploy
 
-| Variable | Default | Description |
-|---|---|---|
-| `PORT` | required | Port the server listens on |
-| `NODE_ENV` | `development` | `production` serves the built React app |
-| `UPLOAD_DIR` | `uploads` | Where uploaded chunks are stored |
-| `MAX_FILE_SIZE_MB` | `500` | Max upload size |
-| `CHUNK_SIZE_MB` | `1` | Size of each split chunk |
+### Fly.io
 
-## Project Structure
-
-```
-client/          React + Vite frontend
-server/          Express 5 API + WebSocket signaling
-  src/
-    lib/
-      fileStore.ts   flat-file JSON metadata store
-      signaling.ts   WebRTC WebSocket signaling
-    routes/
-      files/         upload, list, download, delete endpoints
-      health.ts      /api/healthz
-dist/            build output (gitignored)
-uploads/         uploaded file chunks (gitignored)
+```bash
+fly launch
+fly secrets set SESSION_SECRET=$(openssl rand -hex 32)
+fly volumes create filesplit_data --region fra --size 5
+fly deploy
 ```
 
-## Features
+### Railway
 
-- **File splitting** — uploaded files are split into 1 MB chunks stored on disk
-- **JS embed snippet** — paste a `<script>` tag anywhere to add a reassembled download button
-- **P2P seeding** — share files peer-to-peer via WebRTC without server storage
-- **File expiry** — optional expiration on upload; expired files are auto-purged
-- **Chunk API** — direct URL access to individual chunks
+`railway.toml` mevcut — Railway dashboard'dan SESSION_SECRET girin, otomatik deploy olur.
+
+### Render
+
+`render.yaml` mevcut — Render dashboard'dan "New Blueprint" ile yükleyin. SESSION_SECRET otomatik oluşturulur.
+
+## Stack
+
+- **Backend**: Node.js 22, Express 5, TypeScript, express-session, bcryptjs, multer, ws
+- **Frontend**: React 19, Vite 7, Tailwind CSS v4, wouter, TanStack Query
+- **Depolama**: Flat-file (uploads/ dizini)

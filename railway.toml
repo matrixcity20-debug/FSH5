@@ -1,8 +1,8 @@
 [build]
-builder = "nixpacks"
-buildCommand = "npm install && npm run build"
+builder = "DOCKERFILE"
 
 [deploy]
-startCommand = "node dist/server/index.mjs"
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 3
+startCommand = "node dist/server/index.js"
+healthcheckPath = "/api/healthz"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"

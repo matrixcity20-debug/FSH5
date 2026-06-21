@@ -3,18 +3,19 @@ import path from "path";
 import crypto from "crypto";
 
 export const uploadsDir =
-  process.env.NODE_ENV === "production"
+  process.env["NODE_ENV"] === "production"
     ? "/uploads"
     : path.resolve(process.cwd(), "uploads");
 
 export const CHUNK_SIZE =
-  Math.max(1, Math.min(100, Number(process.env.CHUNK_SIZE_MB ?? 1))) * 1024 * 1024;
+  Math.max(1, Math.min(100, Number(process.env["CHUNK_SIZE_MB"] ?? 1))) * 1024 * 1024;
 
 export const MAX_FILE_SIZE =
-  Math.max(1, Math.min(2000, Number(process.env.MAX_FILE_SIZE_MB ?? 500))) * 1024 * 1024;
+  Math.max(1, Math.min(2000, Number(process.env["MAX_FILE_SIZE_MB"] ?? 500))) * 1024 * 1024;
 
 export interface FileMeta {
   id: string;
+  userId?: string;
   name: string;
   size: number;
   mimeType: string;
@@ -32,6 +33,7 @@ export interface FileMeta {
 
 export interface FolderMeta {
   id: string;
+  userId?: string;
   name: string;
   createdAt: string;
 }
@@ -80,14 +82,17 @@ export function readFolderMeta(folderId: string): FolderMeta | null {
   }
 }
 
-export function listFolders(): FolderMeta[] {
+export function listFolders(userId?: string): FolderMeta[] {
   ensureFoldersDir();
   const entries = fs.readdirSync(getFoldersDir()).filter((f) => f.endsWith(".json"));
   const folders: FolderMeta[] = [];
   for (const entry of entries) {
     try {
       const raw = fs.readFileSync(path.join(getFoldersDir(), entry), "utf-8");
-      folders.push(JSON.parse(raw) as FolderMeta);
+      const folder = JSON.parse(raw) as FolderMeta;
+      if (userId === undefined || folder.userId === userId) {
+        folders.push(folder);
+      }
     } catch { /* skip corrupt entries */ }
   }
   return folders.sort((a, b) => a.name.localeCompare(b.name));
@@ -157,7 +162,7 @@ export function isFileExpired(meta: FileMeta): boolean {
   return new Date(meta.expiresAt) < new Date();
 }
 
-export function listAllFiles(): FileMeta[] {
+export function listAllFiles(userId?: string): FileMeta[] {
   ensureUploadsDir();
   const entries = fs.readdirSync(uploadsDir, { withFileTypes: true });
   const files: FileMeta[] = [];
@@ -165,8 +170,13 @@ export function listAllFiles(): FileMeta[] {
     if (!entry.isDirectory()) continue;
     if (entry.name.startsWith("tmp_")) continue;
     if (entry.name.startsWith("_")) continue;
+    if (entry.name.startsWith("upload_")) continue;
     const meta = readMeta(entry.name);
-    if (meta && !isFileExpired(meta)) files.push(meta);
+    if (meta && !isFileExpired(meta)) {
+      if (userId === undefined || meta.userId === userId) {
+        files.push(meta);
+      }
+    }
   }
   return files.sort(
     (a, b) =>
@@ -190,6 +200,7 @@ export function purgeExpiredFiles(): number {
     if (!entry.isDirectory()) continue;
     if (entry.name.startsWith("tmp_")) continue;
     if (entry.name.startsWith("_")) continue;
+    if (entry.name.startsWith("upload_")) continue;
     const meta = readMeta(entry.name);
     if (meta && isFileExpired(meta)) {
       deleteFile(meta.id);
@@ -220,20 +231,6 @@ export function splitAndSaveFromPath(fileId: string, tempPath: string): number {
   }
 
   return chunkCount;
-}
-
-export function splitAndSave(fileId: string, buffer: Buffer): number {
-  const dir = getFileDir(fileId);
-  fs.mkdirSync(dir, { recursive: true });
-  let chunkIndex = 0;
-  let offset = 0;
-  while (offset < buffer.length) {
-    const chunk = buffer.subarray(offset, offset + CHUNK_SIZE);
-    fs.writeFileSync(getChunkPath(fileId, chunkIndex), chunk);
-    chunkIndex++;
-    offset += CHUNK_SIZE;
-  }
-  return chunkIndex;
 }
 
 export function buildChunkUrls(
@@ -273,21 +270,6 @@ export function getPartPath(uploadId: string, partIndex: number): string {
 
 export function cleanupUpload(uploadId: string): void {
   try { fs.rmSync(getUploadTempDir(uploadId), { recursive: true, force: true }); } catch { /* ignore */ }
-}
-
-export function sha256File(filePath: string): string {
-  const hash = crypto.createHash("sha256");
-  const fd = fs.openSync(filePath, "r");
-  const buf = Buffer.allocUnsafe(1024 * 1024);
-  try {
-    let n: number;
-    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
-      hash.update(buf.subarray(0, n));
-    }
-  } finally {
-    fs.closeSync(fd);
-  }
-  return hash.digest("hex");
 }
 
 export function assembleAndSplit(uploadId: string, fileId: string, totalParts: number): number {
@@ -345,4 +327,19 @@ export function generateSnippet(meta: FileMeta, baseUrl: string): string {
   window.FileSplit = window.FileSplit || {};
   window.FileSplit["${meta.id}"] = { download: downloadFile, fileName: fileName };
 })();`;
+}
+
+export function sha256File(filePath: string): string {
+  const hash = crypto.createHash("sha256");
+  const fd = fs.openSync(filePath, "r");
+  const buf = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let n: number;
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(buf.subarray(0, n));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex");
 }

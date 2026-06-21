@@ -37,17 +37,17 @@ export function attachSignalingServer(httpServer: Server) {
         return;
       }
 
-      const type = msg.type as string;
+      const type = msg["type"] as string;
 
       if (type === "seed") {
-        const fileId = msg.fileId as string;
+        const fileId = msg["fileId"] as string;
         client.role = "seeder";
         client.fileId = fileId;
         seeders.set(fileId, clientId);
         logger.info({ clientId, fileId }, "Seeder registered");
         send(ws, { type: "seeding", fileId });
       } else if (type === "leech") {
-        const fileId = msg.fileId as string;
+        const fileId = msg["fileId"] as string;
         client.role = "leecher";
         client.fileId = fileId;
         const seederId = seeders.get(fileId);
@@ -65,20 +65,20 @@ export function attachSignalingServer(httpServer: Server) {
         send(seeder.ws, { type: "peer-joined", leecherId: clientId });
         send(ws, { type: "seeder-found", seederId });
       } else if (type === "offer") {
-        const to = msg.to as string;
+        const to = msg["to"] as string;
         const target = clients.get(to);
-        if (target) send(target.ws, { type: "offer", from: clientId, sdp: msg.sdp });
+        if (target) send(target.ws, { type: "offer", from: clientId, sdp: msg["sdp"] });
       } else if (type === "answer") {
-        const to = msg.to as string;
+        const to = msg["to"] as string;
         const target = clients.get(to);
-        if (target) send(target.ws, { type: "answer", from: clientId, sdp: msg.sdp });
+        if (target) send(target.ws, { type: "answer", from: clientId, sdp: msg["sdp"] });
       } else if (type === "ice") {
-        const to = msg.to as string;
+        const to = msg["to"] as string;
         const target = clients.get(to);
         if (target)
-          send(target.ws, { type: "ice", from: clientId, candidate: msg.candidate });
+          send(target.ws, { type: "ice", from: clientId, candidate: msg["candidate"] });
       } else if (type === "seeder-status") {
-        const fileId = (msg.fileId as string) ?? client.fileId;
+        const fileId = (msg["fileId"] as string) ?? client.fileId;
         const seederId = fileId ? seeders.get(fileId) : undefined;
         const seeder = seederId ? clients.get(seederId) : undefined;
         const online = !!seeder && seeder.ws.readyState === WebSocket.OPEN;

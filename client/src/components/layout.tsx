@@ -1,8 +1,16 @@
 import { Link, useLocation } from "wouter";
-import { Layers, HardDrive } from "lucide-react";
+import { Layers, HardDrive, LogOut, User } from "lucide-react";
+import { useAuth } from "@/hooks/use-auth";
+import { toast } from "@/hooks/use-toast";
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
+  const { user, logout } = useAuth();
+
+  const handleLogout = async () => {
+    await logout();
+    toast({ title: "Çıkış yapıldı" });
+  };
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -17,27 +25,45 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </div>
           </Link>
 
-          <nav className="flex items-center gap-1">
-            <Link href="/">
-              <button
-                className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-colors ${
-                  location === "/" ? "bg-primary/10 text-primary border border-primary/20" : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-                }`}
-              >
-                Upload
-              </button>
-            </Link>
-            <Link href="/files">
-              <button
-                className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-colors flex items-center gap-1.5 ${
-                  location.startsWith("/files") ? "bg-primary/10 text-primary border border-primary/20" : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
-                }`}
-              >
-                <HardDrive className="w-3 h-3" />
-                Library
-              </button>
-            </Link>
-          </nav>
+          <div className="flex items-center gap-2">
+            <nav className="flex items-center gap-1">
+              <Link href="/">
+                <button
+                  className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-colors ${
+                    location === "/" ? "bg-primary/10 text-primary border border-primary/20" : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
+                  }`}
+                >
+                  Yükle
+                </button>
+              </Link>
+              <Link href="/files">
+                <button
+                  className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-colors flex items-center gap-1.5 ${
+                    location.startsWith("/files") ? "bg-primary/10 text-primary border border-primary/20" : "text-muted-foreground hover:text-foreground hover:bg-muted/40"
+                  }`}
+                >
+                  <HardDrive className="w-3 h-3" />
+                  Kütüphane
+                </button>
+              </Link>
+            </nav>
+
+            {user && (
+              <div className="flex items-center gap-2 ml-2 pl-2 border-l border-border/60">
+                <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-muted/30 border border-border/40">
+                  <User className="w-3 h-3 text-muted-foreground" />
+                  <span className="text-xs font-mono text-muted-foreground">{user.username}</span>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
+                  title="Çıkış Yap"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
