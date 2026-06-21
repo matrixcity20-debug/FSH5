@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { useLocation } from "wouter";
 import {
   UploadCloud, File, AlertCircle, Clock, Zap, Code2,
-  Shield, Radio, Server, Users, Wifi, WifiOff, X,
+  Shield, Radio, Server, Users, Wifi, WifiOff, X, GitBranch, Link2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -95,17 +95,59 @@ type UploadStep =
 export default function UploadPage() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+
   const [dragActive, setDragActive] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [uploadStep, setUploadStep] = useState<UploadStep>({ phase: "idle" });
   const [ttl, setTtl] = useState("");
   const [seederState, setSeederState] = useState<SeederState | null>(null);
+  const [versionInput, setVersionInput] = useState("");
+  const [parentFileId, setParentFileId] = useState<string | null>(null);
+  const [parentFileName, setParentFileName] = useState<string | null>(null);
+  const [versionLookupLoading, setVersionLookupLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const xhrRef = useRef<XMLHttpRequest | null>(null);
   const chunksRef = useRef<ArrayBuffer[]>([]);
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const abortRef = useRef(false);
+
+  /** Extract fileId from a full URL like /files/<uuid> or bare uuid */
+  const extractFileId = (input: string): string | null => {
+    const uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    const m = input.match(uuidRe);
+    return m ? m[0] : null;
+  };
+
+  const lookupParent = async (raw: string) => {
+    const id = extractFileId(raw);
+    if (!id) {
+      toast({ variant: "destructive", title: "Invalid URL / ID" });
+      return;
+    }
+    setVersionLookupLoading(true);
+    try {
+      const res = await fetch(`/api/files/${id}`);
+      if (!res.ok) throw new Error("File not found");
+      const meta = await res.json() as { id: string; name: string };
+      setParentFileId(meta.id);
+      setParentFileName(meta.name);
+    } catch {
+      toast({ variant: "destructive", title: "File not found", description: "Check the URL and try again." });
+      setParentFileId(null);
+      setParentFileName(null);
+    } finally {
+      setVersionLookupLoading(false);
+    }
+  };
+
+  // Auto-link parent from query string: /?parentFileId=<uuid>
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const pid = params.get("parentFileId");
+    if (pid) void lookupParent(pid);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -223,6 +265,7 @@ export default function UploadPage() {
           totalParts,
           sha256,
           ...(ttl ? { ttl } : {}),
+          ...(parentFileId ? { parentFileId } : {}),
         }),
       });
       if (abortRef.current) return;
@@ -602,13 +645,13 @@ export default function UploadPage() {
                 <p className="text-sm text-muted-foreground">{formatBytes(file.size)}</p>
               </div>
 
-              <div className="flex flex-col items-center gap-4" onClick={(e) => e.stopPropagation()}>
-                <div className="flex items-center gap-2 bg-muted/50 border border-border rounded-lg px-3 py-2">
+              <div className="flex flex-col items-center gap-4 w-full max-w-xs" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center gap-2 bg-muted/50 border border-border rounded-lg px-3 py-2 w-full">
                   <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
                   <select
                     value={ttl}
                     onChange={(e) => setTtl(e.target.value)}
-                    className="bg-transparent text-sm font-mono text-foreground focus:outline-none"
+                    className="bg-transparent text-sm font-mono text-foreground focus:outline-none w-full"
                   >
                     {TTL_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value} className="bg-card">{opt.label}</option>
@@ -616,9 +659,49 @@ export default function UploadPage() {
                   </select>
                 </div>
 
+                {/* ── Versioning ── */}
+                <div className="w-full space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
+                    <GitBranch className="w-3.5 h-3.5" />
+                    <span>Upload as new version of an existing file?</span>
+                  </div>
+                  {parentFileId ? (
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5">
+                      <Link2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      <span className="text-xs font-mono text-emerald-400 truncate flex-1">{parentFileName}</span>
+                      <button
+                        className="text-muted-foreground hover:text-foreground transition-colors"
+                        onClick={() => { setParentFileId(null); setParentFileName(null); setVersionInput(""); }}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={versionInput}
+                        onChange={(e) => setVersionInput(e.target.value)}
+                        placeholder="Paste file URL or ID…"
+                        className="flex-1 bg-muted/50 border border-border rounded-lg px-3 py-1.5 text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/40"
+                        onKeyDown={(e) => { if (e.key === "Enter" && versionInput) lookupParent(versionInput); }}
+                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-xs font-mono px-3"
+                        disabled={!versionInput || versionLookupLoading}
+                        onClick={() => lookupParent(versionInput)}
+                      >
+                        {versionLookupLoading ? "…" : "Link"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+
                 <p className="text-xs text-muted-foreground font-mono">How do you want to share this file?</p>
 
-                <div className="grid grid-cols-2 gap-3 w-full max-w-xs">
+                <div className="grid grid-cols-2 gap-3 w-full">
                   <button
                     onClick={handleUpload}
                     className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-border hover:border-primary/40 bg-card hover:bg-primary/5 transition-all cursor-pointer"
@@ -637,7 +720,7 @@ export default function UploadPage() {
                   </button>
                 </div>
 
-                <Button variant="ghost" size="sm" onClick={() => setFile(null)} className="font-mono text-xs text-muted-foreground">
+                <Button variant="ghost" size="sm" onClick={() => { setFile(null); setParentFileId(null); setParentFileName(null); setVersionInput(""); }} className="font-mono text-xs text-muted-foreground">
                   Clear
                 </Button>
               </div>

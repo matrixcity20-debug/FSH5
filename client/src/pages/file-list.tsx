@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
-import { HardDrive, Trash2, ChevronRight, File, Clock, Plus } from "lucide-react";
+import { HardDrive, Trash2, ChevronRight, File, Clock, Plus, GitBranch } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 import {
   useListFiles,
@@ -75,9 +75,17 @@ export default function FileListPage() {
                     <File className="w-4 h-4 text-primary" />
                   </div>
                   <div className="min-w-0">
-                    <p className="font-mono text-sm font-semibold text-foreground truncate max-w-[280px]" title={file.name}>
-                      {file.name}
-                    </p>
+                    <div className="flex items-center gap-2">
+                      <p className="font-mono text-sm font-semibold text-foreground truncate max-w-[260px]" title={file.name}>
+                        {file.name}
+                      </p>
+                      {(file as unknown as { version?: number }).version !== undefined && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-primary/20 bg-primary/5 text-primary text-[10px] font-mono shrink-0">
+                          <GitBranch className="w-2.5 h-2.5" />
+                          v{(file as unknown as { version?: number }).version}
+                        </span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-3 mt-0.5">
                       <span className="text-xs text-muted-foreground font-mono">{formatBytes(file.size)}</span>
                       <span className="text-xs text-muted-foreground/40">·</span>

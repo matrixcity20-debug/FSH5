@@ -25,6 +25,8 @@ export interface FileMeta {
   expiresAt?: string;
   seedOnly?: boolean;
   sha256?: string;
+  groupId?: string;
+  version?: number;
 }
 
 export function ensureUploadsDir(): void {
@@ -184,6 +186,22 @@ export function buildChunkUrls(
     { length: chunkCount },
     (_, i) => `${baseUrl}/api/files/${fileId}/chunks/${i}`,
   );
+}
+
+/** Return all versions of a group, sorted oldest→newest. */
+export function listVersions(groupId: string): FileMeta[] {
+  ensureUploadsDir();
+  const all = listAllFiles();
+  return all
+    .filter((f) => f.groupId === groupId)
+    .sort((a, b) => (a.version ?? 0) - (b.version ?? 0));
+}
+
+/** Return the next version number for a group (max existing + 1). */
+export function nextVersion(groupId: string): number {
+  const versions = listVersions(groupId);
+  if (versions.length === 0) return 2;
+  return Math.max(...versions.map((f) => f.version ?? 1)) + 1;
 }
 
 export const UPLOAD_PART_SIZE = 5 * 1024 * 1024; // 5 MB per HTTP part

@@ -23,6 +23,8 @@ import {
   getPartPath,
   cleanupUpload,
   assembleAndSplit,
+  listVersions,
+  nextVersion,
   type FileMeta,
 } from "../../lib/fileStore.js";
 
@@ -190,7 +192,7 @@ router.post(
 // ── POST /files/upload-finalize ───────────────────────────────────────────────
 // Assembles all parts, verifies SHA-256 against client hash, splits into chunks.
 router.post("/files/upload-finalize", async (req, res): Promise<void> => {
-  const { uploadId, name, size, mimeType, totalParts, sha256, ttl } = req.body as {
+  const { uploadId, name, size, mimeType, totalParts, sha256, ttl, parentFileId } = req.body as {
     uploadId: string;
     name: string;
     size: number;
@@ -198,6 +200,7 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
     totalParts: number;
     sha256: string;
     ttl?: string;
+    parentFileId?: string;
   };
 
   if (!uploadId || !name || !size || !mimeType || !totalParts || !sha256) {
@@ -248,6 +251,26 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
       expiresAt = new Date(Date.now() + TTL_OPTIONS[ttlKey]).toISOString();
     }
 
+    // ── Versioning ────────────────────────────────────────────────────────────
+    let groupId: string | undefined;
+    let version: number | undefined;
+
+    if (parentFileId) {
+      const parentMeta = readMeta(parentFileId);
+      if (parentMeta) {
+        if (parentMeta.groupId) {
+          groupId = parentMeta.groupId;
+        } else {
+          // Retroactively promote parent to version 1 in a new group
+          groupId = uuidv4();
+          parentMeta.groupId = groupId;
+          parentMeta.version = 1;
+          saveMeta(parentMeta);
+        }
+        version = nextVersion(groupId);
+      }
+    }
+
     const chunkUrls = buildChunkUrls(fileId, chunkCount, baseUrl);
     const meta: FileMeta = {
       id: fileId,
@@ -260,10 +283,11 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
       chunkUrls,
       sha256: serverHash,
       ...(expiresAt ? { expiresAt } : {}),
+      ...(groupId ? { groupId, version } : {}),
     };
 
     saveMeta(meta);
-    req.log.info({ fileId, name, chunkCount, sha256: serverHash }, "Chunked upload finalised");
+    req.log.info({ fileId, name, chunkCount, sha256: serverHash, version }, "Chunked upload finalised");
     res.status(201).json(meta);
   } catch (err) {
     cleanupUpload(uploadId);
@@ -326,6 +350,17 @@ router.get("/files", async (_req, res): Promise<void> => {
   ensureUploadsDir();
   const files = listAllFiles();
   res.json(files);
+});
+
+// ── GET /files/group/:groupId ─────────────────────────────────────────────────
+router.get("/files/group/:groupId", async (req, res): Promise<void> => {
+  const { groupId } = req.params;
+  if (!groupId || !isValidFileId(groupId)) {
+    res.status(400).json({ error: "Invalid groupId" });
+    return;
+  }
+  const versions = listVersions(groupId);
+  res.json(versions);
 });
 
 // ── GET /files/:fileId ───────────────────────────────────────────────────────

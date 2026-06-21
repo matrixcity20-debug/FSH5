@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { useParams, useLocation } from "wouter";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Copy, Download, Trash2, Terminal, ArrowLeft, Layers,
-  FileCode2, Check, Link2, Clock, Radio, WifiOff, Loader2,
+  FileCode2, Check, Link2, Clock, Radio, WifiOff, Loader2, GitBranch, Plus,
 } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 import {
@@ -20,6 +20,91 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { Link } from "wouter";
+
+interface VersionMeta {
+  id: string;
+  name: string;
+  size: number;
+  uploadedAt: string;
+  version?: number;
+  groupId?: string;
+}
+
+function VersionHistory({ groupId, currentFileId }: { groupId: string; currentFileId: string }) {
+  const { data: versions, isLoading } = useQuery<VersionMeta[]>({
+    queryKey: ["group", groupId],
+    queryFn: async () => {
+      const res = await fetch(`/api/files/group/${groupId}`);
+      if (!res.ok) throw new Error("Failed to load versions");
+      return res.json() as Promise<VersionMeta[]>;
+    },
+  });
+
+  if (isLoading) {
+    return <div className="h-8 animate-pulse bg-muted rounded-lg" />;
+  }
+
+  if (!versions || versions.length < 2) return null;
+
+  return (
+    <Card className="border-border/60 bg-card/60 backdrop-blur-sm">
+      <CardHeader className="pb-3">
+        <CardTitle className="font-mono text-sm flex items-center gap-2">
+          <GitBranch className="w-3.5 h-3.5 text-primary" />
+          Version History
+          <span className="ml-auto text-xs font-normal text-muted-foreground font-sans">{versions.length} versions</span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-1.5">
+        {[...versions].reverse().map((v) => {
+          const isCurrent = v.id === currentFileId;
+          return (
+            <div
+              key={v.id}
+              className={`flex items-center justify-between px-3 py-2.5 rounded-lg border transition-all ${
+                isCurrent
+                  ? "border-primary/30 bg-primary/5"
+                  : "border-border/40 bg-muted/10 hover:bg-muted/20 hover:border-border/70"
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className={`text-xs font-mono font-bold shrink-0 ${isCurrent ? "text-primary" : "text-muted-foreground"}`}>
+                  v{v.version ?? "?"}
+                </span>
+                <span className="text-xs font-mono text-foreground truncate max-w-[180px]">{v.name}</span>
+                {isCurrent && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-primary/10 border border-primary/20 text-primary shrink-0">
+                    current
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-xs text-muted-foreground font-mono hidden sm:block">
+                  {format(new Date(v.uploadedAt), "MMM d, yyyy")}
+                </span>
+                {!isCurrent && (
+                  <Link href={`/files/${v.id}`}>
+                    <Button variant="ghost" size="sm" className="h-6 px-2 text-[10px] font-mono">
+                      View
+                    </Button>
+                  </Link>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        <div className="pt-1">
+          <Link href={`/?parentFileId=${currentFileId}`}>
+            <Button variant="outline" size="sm" className="w-full gap-2 text-xs font-mono">
+              <Plus className="w-3.5 h-3.5" />
+              Upload new version
+            </Button>
+          </Link>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 function formatBytes(bytes: number, decimals = 2) {
   if (!+bytes) return "0 Bytes";
@@ -363,10 +448,15 @@ export default function FileDetailPage() {
             </Button>
           </Link>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-xl font-bold font-mono text-foreground truncate max-w-xl" title={file.name}>
                 {file.name}
               </h1>
+              {(file as unknown as { version?: number }).version !== undefined && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-primary/30 bg-primary/10 text-primary text-[10px] font-mono shrink-0">
+                  <GitBranch className="w-2.5 h-2.5" /> v{(file as unknown as { version?: number }).version}
+                </span>
+              )}
               {isSeedOnly && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-primary/30 bg-primary/10 text-primary text-[10px] font-mono shrink-0">
                   <Radio className="w-2.5 h-2.5" /> P2P Seed
@@ -553,6 +643,13 @@ export default function FileDetailPage() {
               )}
             </CardContent>
           </Card>
+
+          {(file as unknown as { groupId?: string }).groupId && (
+            <VersionHistory
+              groupId={(file as unknown as { groupId?: string }).groupId!}
+              currentFileId={fileId}
+            />
+          )}
 
           <Card className="border-border/60 bg-card/60 backdrop-blur-sm">
             <CardHeader className="pb-3">
