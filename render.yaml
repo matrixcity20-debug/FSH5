@@ -3,7 +3,7 @@ services:
     name: filesplit
     env: node
     plan: free
-    buildCommand: npm ci && npm run build
+    buildCommand: npm install && npm run build
     startCommand: node dist/server/index.js
     healthCheckPath: /api/healthz
     envVars:

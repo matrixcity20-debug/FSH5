@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import rateLimit from "express-rate-limit";
 import bcrypt from "bcryptjs";
 import { findUserByUsername, createUser, usernameExists, findUserById } from "../lib/userStore.js";
 
@@ -10,7 +11,16 @@ declare module "express-session" {
 
 const router: IRouter = Router();
 
-router.post("/auth/register", async (req, res): Promise<void> => {
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Çok fazla deneme yapıldı. 15 dakika sonra tekrar deneyin." },
+  skipSuccessfulRequests: true,
+});
+
+router.post("/auth/register", authLimiter, async (req, res): Promise<void> => {
   const { username, password } = req.body as { username?: string; password?: string };
 
   if (!username || typeof username !== "string" || username.trim().length < 3) {
@@ -46,7 +56,7 @@ router.post("/auth/register", async (req, res): Promise<void> => {
   res.status(201).json({ id: user.id, username: user.username });
 });
 
-router.post("/auth/login", async (req, res): Promise<void> => {
+router.post("/auth/login", authLimiter, async (req, res): Promise<void> => {
   const { username, password } = req.body as { username?: string; password?: string };
 
   if (!username || !password) {
@@ -73,6 +83,7 @@ router.post("/auth/login", async (req, res): Promise<void> => {
 
 router.post("/auth/logout", (req, res): void => {
   req.session.destroy(() => {
+    res.clearCookie("fs.sid");
     res.json({ ok: true });
   });
 });

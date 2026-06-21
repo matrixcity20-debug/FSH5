@@ -604,7 +604,6 @@ router.get("/files/:fileId/download", async (req, res): Promise<void> => {
 
 router.get(
   "/files/:fileId/chunks/:chunkIndex",
-  requireAuth,
   async (req, res): Promise<void> => {
     const { fileId } = req.params;
     const rawIdx = req.params.chunkIndex;
@@ -618,10 +617,6 @@ router.get(
     const meta = readMeta(fileId);
     if (!meta) {
       res.status(404).json({ error: "Dosya bulunamadı" });
-      return;
-    }
-    if (meta.userId !== req.session.userId) {
-      res.status(403).json({ error: "Bu dosyaya erişim izniniz yok" });
       return;
     }
 
