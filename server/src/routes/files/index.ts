@@ -26,11 +26,16 @@ import {
   listVersions,
   nextVersion,
   type FileMeta,
+  saveFolderMeta,
+  readFolderMeta,
+  listFolders,
+  deleteFolderMeta,
+  isValidFolderId,
+  type FolderMeta,
 } from "../../lib/fileStore.js";
 
 const router: IRouter = Router();
 
-// ── Multer: write to disk, never buffer whole file in RAM ─────────────────
 ensureUploadsDir();
 const upload = multer({
   storage: multer.diskStorage({
@@ -53,7 +58,7 @@ const TTL_OPTIONS: Record<string, number> = {
 };
 
 const MAX_CHUNK_COUNT = 10_000;
-const MAX_SEED_SIZE = 50 * 1024 * 1024 * 1024; // 50 GB — sanity cap
+const MAX_SEED_SIZE = 50 * 1024 * 1024 * 1024;
 
 function getBaseUrl(req: {
   protocol: string;
@@ -65,7 +70,97 @@ function getBaseUrl(req: {
   return `${protocol}://${host}`;
 }
 
-// ── POST /files/upload ───────────────────────────────────────────────────────
+// ── GET /folders ──────────────────────────────────────────────────────────────
+router.get("/folders", async (_req, res): Promise<void> => {
+  const folders = listFolders();
+  res.json(folders);
+});
+
+// ── POST /folders ─────────────────────────────────────────────────────────────
+router.post("/folders", async (req, res): Promise<void> => {
+  const { name } = req.body as { name?: string };
+  if (!name || typeof name !== "string" || name.trim().length === 0) {
+    res.status(400).json({ error: "Folder name is required" });
+    return;
+  }
+  if (name.trim().length > 128) {
+    res.status(400).json({ error: "Folder name too long (max 128 chars)" });
+    return;
+  }
+
+  const folder: FolderMeta = {
+    id: uuidv4(),
+    name: name.trim(),
+    createdAt: new Date().toISOString(),
+  };
+  saveFolderMeta(folder);
+  req.log.info({ folderId: folder.id, name: folder.name }, "Folder created");
+  res.status(201).json(folder);
+});
+
+// ── DELETE /folders/:folderId ─────────────────────────────────────────────────
+router.delete("/folders/:folderId", async (req, res): Promise<void> => {
+  const { folderId } = req.params;
+  if (!folderId || !isValidFolderId(folderId)) {
+    res.status(400).json({ error: "Invalid folderId" });
+    return;
+  }
+
+  const folder = readFolderMeta(folderId);
+  if (!folder) {
+    res.status(404).json({ error: "Folder not found" });
+    return;
+  }
+
+  // Move all files in this folder back to root (no folder)
+  const allFiles = listAllFiles();
+  for (const file of allFiles) {
+    if (file.folderId === folderId) {
+      const updated = { ...file, folderId: undefined };
+      saveMeta(updated);
+    }
+  }
+
+  deleteFolderMeta(folderId);
+  req.log.info({ folderId }, "Folder deleted, files moved to root");
+  res.sendStatus(204);
+});
+
+// ── PATCH /files/:fileId/folder ───────────────────────────────────────────────
+router.patch("/files/:fileId/folder", async (req, res): Promise<void> => {
+  const { fileId } = req.params;
+  const { folderId } = req.body as { folderId?: string | null };
+
+  if (!fileId || !isValidFileId(fileId)) {
+    res.status(400).json({ error: "Invalid fileId" });
+    return;
+  }
+
+  const meta = readMeta(fileId);
+  if (!meta) {
+    res.status(404).json({ error: "File not found" });
+    return;
+  }
+
+  if (folderId && folderId !== null) {
+    if (!isValidFolderId(folderId)) {
+      res.status(400).json({ error: "Invalid folderId" });
+      return;
+    }
+    if (!readFolderMeta(folderId)) {
+      res.status(404).json({ error: "Folder not found" });
+      return;
+    }
+    meta.folderId = folderId;
+  } else {
+    delete meta.folderId;
+  }
+
+  saveMeta(meta);
+  res.json(meta);
+});
+
+// ── POST /files/upload ────────────────────────────────────────────────────────
 router.post(
   "/files/upload",
   upload.single("file"),
@@ -91,6 +186,9 @@ router.post(
         expiresAt = new Date(Date.now() + TTL_OPTIONS[ttlKey]).toISOString();
       }
 
+      const folderId = typeof req.body?.folderId === "string" && isValidFolderId(req.body.folderId)
+        ? req.body.folderId : undefined;
+
       const meta: FileMeta = {
         id: fileId,
         name: req.file.originalname,
@@ -101,16 +199,13 @@ router.post(
         uploadedAt: new Date().toISOString(),
         chunkUrls,
         ...(expiresAt ? { expiresAt } : {}),
+        ...(folderId ? { folderId } : {}),
       };
 
       saveMeta(meta);
-      req.log.info(
-        { fileId, name: meta.name, chunkCount, expiresAt },
-        "File uploaded and split",
-      );
+      req.log.info({ fileId, name: meta.name, chunkCount, expiresAt, folderId }, "File uploaded and split");
       res.status(201).json(meta);
     } catch (err) {
-      // Clean up temp file if anything went wrong
       try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
       req.log.error({ err }, "Upload failed");
       res.status(500).json({ error: "Upload failed" });
@@ -118,8 +213,7 @@ router.post(
   },
 );
 
-// ── POST /files/upload-init ──────────────────────────────────────────────────
-// Initialises a multi-part upload session. Returns uploadId + partSize.
+// ── POST /files/upload-init ───────────────────────────────────────────────────
 router.post("/files/upload-init", async (req, res): Promise<void> => {
   const { name, size, mimeType } = req.body as {
     name: string;
@@ -149,8 +243,6 @@ router.post("/files/upload-init", async (req, res): Promise<void> => {
 });
 
 // ── POST /files/upload-part ───────────────────────────────────────────────────
-// Receives one binary part. Body: multipart with fields uploadId, partIndex,
-// totalParts and a file field named "part".
 const partUpload = multer({
   storage: multer.diskStorage({
     destination: (req, _file, cb) => {
@@ -190,9 +282,8 @@ router.post(
 );
 
 // ── POST /files/upload-finalize ───────────────────────────────────────────────
-// Assembles all parts, verifies SHA-256 against client hash, splits into chunks.
 router.post("/files/upload-finalize", async (req, res): Promise<void> => {
-  const { uploadId, name, size, mimeType, totalParts, sha256, ttl, parentFileId } = req.body as {
+  const { uploadId, name, size, mimeType, totalParts, sha256, ttl, parentFileId, folderId } = req.body as {
     uploadId: string;
     name: string;
     size: number;
@@ -201,6 +292,7 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
     sha256: string;
     ttl?: string;
     parentFileId?: string;
+    folderId?: string;
   };
 
   if (!uploadId || !name || !size || !mimeType || !totalParts || !sha256) {
@@ -214,7 +306,6 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
     return;
   }
 
-  // Verify all parts are present
   for (let i = 0; i < totalParts; i++) {
     if (!fs.existsSync(getPartPath(uploadId, i))) {
       res.status(400).json({ error: `Missing part ${i}` });
@@ -228,7 +319,6 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
     const chunkCount = assembleAndSplit(uploadId, fileId, totalParts);
     const baseUrl = getBaseUrl(req);
 
-    // Hash all stored chunks in sequence — this equals SHA-256 of the original file
     const { createHash } = await import("crypto");
     const fileHash = createHash("sha256");
     for (let i = 0; i < chunkCount; i++) {
@@ -238,7 +328,6 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
     const serverHash = fileHash.digest("hex");
 
     if (serverHash !== sha256.toLowerCase()) {
-      // Hash mismatch — delete bad file and report
       deleteFile(fileId);
       req.log.warn({ uploadId, fileId, serverHash, clientHash: sha256 }, "SHA-256 mismatch");
       res.status(409).json({ error: "Integrity check failed: SHA-256 mismatch. Please try uploading again." });
@@ -251,7 +340,6 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
       expiresAt = new Date(Date.now() + TTL_OPTIONS[ttlKey]).toISOString();
     }
 
-    // ── Versioning ────────────────────────────────────────────────────────────
     let groupId: string | undefined;
     let version: number | undefined;
 
@@ -261,7 +349,6 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
         if (parentMeta.groupId) {
           groupId = parentMeta.groupId;
         } else {
-          // Retroactively promote parent to version 1 in a new group
           groupId = uuidv4();
           parentMeta.groupId = groupId;
           parentMeta.version = 1;
@@ -270,6 +357,9 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
         version = nextVersion(groupId);
       }
     }
+
+    const resolvedFolderId = folderId && isValidFolderId(folderId) && readFolderMeta(folderId)
+      ? folderId : undefined;
 
     const chunkUrls = buildChunkUrls(fileId, chunkCount, baseUrl);
     const meta: FileMeta = {
@@ -284,10 +374,11 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
       sha256: serverHash,
       ...(expiresAt ? { expiresAt } : {}),
       ...(groupId ? { groupId, version } : {}),
+      ...(resolvedFolderId ? { folderId: resolvedFolderId } : {}),
     };
 
     saveMeta(meta);
-    req.log.info({ fileId, name, chunkCount, sha256: serverHash, version }, "Chunked upload finalised");
+    req.log.info({ fileId, name, chunkCount, sha256: serverHash, version, folderId: resolvedFolderId }, "Chunked upload finalised");
     res.status(201).json(meta);
   } catch (err) {
     cleanupUpload(uploadId);
@@ -297,30 +388,28 @@ router.post("/files/upload-finalize", async (req, res): Promise<void> => {
   }
 });
 
-// ── POST /files/register-seed ────────────────────────────────────────────────
+// ── POST /files/register-seed ─────────────────────────────────────────────────
 router.post("/files/register-seed", async (req, res): Promise<void> => {
-  const { name, size, mimeType, chunkCount } = req.body as {
+  const { name, size, mimeType, chunkCount, folderId } = req.body as {
     name: string;
     size: number;
     mimeType: string;
     chunkCount: number;
+    folderId?: string;
   };
 
   if (!name || !size || !mimeType || !chunkCount) {
     res.status(400).json({ error: "Missing required fields: name, size, mimeType, chunkCount" });
     return;
   }
-
   if (typeof name !== "string" || name.length > 512) {
     res.status(400).json({ error: "Invalid file name" });
     return;
   }
-
   if (typeof size !== "number" || size <= 0 || size > MAX_SEED_SIZE) {
     res.status(400).json({ error: `Invalid size (max ${MAX_SEED_SIZE} bytes)` });
     return;
   }
-
   if (!Number.isInteger(chunkCount) || chunkCount <= 0 || chunkCount > MAX_CHUNK_COUNT) {
     res.status(400).json({ error: `Invalid chunkCount (max ${MAX_CHUNK_COUNT})` });
     return;
@@ -328,6 +417,9 @@ router.post("/files/register-seed", async (req, res): Promise<void> => {
 
   ensureUploadsDir();
   const fileId = uuidv4();
+  const resolvedFolderId = folderId && isValidFolderId(folderId) && readFolderMeta(folderId)
+    ? folderId : undefined;
+
   const meta: FileMeta = {
     id: fileId,
     name: String(name).slice(0, 512),
@@ -338,17 +430,24 @@ router.post("/files/register-seed", async (req, res): Promise<void> => {
     uploadedAt: new Date().toISOString(),
     chunkUrls: [],
     seedOnly: true,
+    ...(resolvedFolderId ? { folderId: resolvedFolderId } : {}),
   };
 
   saveMeta(meta);
-  req.log.info({ fileId, name: meta.name, chunkCount }, "Seed-only file registered");
+  req.log.info({ fileId, name: meta.name, chunkCount, folderId: resolvedFolderId }, "Seed-only file registered");
   res.status(201).json(meta);
 });
 
-// ── GET /files ───────────────────────────────────────────────────────────────
-router.get("/files", async (_req, res): Promise<void> => {
+// ── GET /files ────────────────────────────────────────────────────────────────
+router.get("/files", async (req, res): Promise<void> => {
   ensureUploadsDir();
-  const files = listAllFiles();
+  let files = listAllFiles();
+  const { folderId } = req.query as { folderId?: string };
+  if (folderId === "root") {
+    files = files.filter((f) => !f.folderId);
+  } else if (folderId && isValidFolderId(folderId)) {
+    files = files.filter((f) => f.folderId === folderId);
+  }
   res.json(files);
 });
 
@@ -363,7 +462,7 @@ router.get("/files/group/:groupId", async (req, res): Promise<void> => {
   res.json(versions);
 });
 
-// ── GET /files/:fileId ───────────────────────────────────────────────────────
+// ── GET /files/:fileId ────────────────────────────────────────────────────────
 router.get("/files/:fileId", async (req, res): Promise<void> => {
   const { fileId } = req.params;
   if (!fileId || !isValidFileId(fileId)) {
@@ -386,7 +485,7 @@ router.get("/files/:fileId", async (req, res): Promise<void> => {
   res.json(meta);
 });
 
-// ── DELETE /files/:fileId ────────────────────────────────────────────────────
+// ── DELETE /files/:fileId ─────────────────────────────────────────────────────
 router.delete("/files/:fileId", async (req, res): Promise<void> => {
   const { fileId } = req.params;
   if (!fileId || !isValidFileId(fileId)) {
@@ -404,7 +503,7 @@ router.delete("/files/:fileId", async (req, res): Promise<void> => {
   res.sendStatus(204);
 });
 
-// ── GET /files/:fileId/snippet ───────────────────────────────────────────────
+// ── GET /files/:fileId/snippet ────────────────────────────────────────────────
 router.get("/files/:fileId/snippet", async (req, res): Promise<void> => {
   const { fileId } = req.params;
   if (!fileId || !isValidFileId(fileId)) {
@@ -429,8 +528,7 @@ router.get("/files/:fileId/snippet", async (req, res): Promise<void> => {
   res.json({ fileId: meta.id, snippet });
 });
 
-// ── GET /files/:fileId/download ──────────────────────────────────────────────
-// Streams chunks to client one-by-one — never loads whole file into RAM.
+// ── GET /files/:fileId/download ───────────────────────────────────────────────
 router.get("/files/:fileId/download", async (req, res): Promise<void> => {
   const { fileId } = req.params;
   if (!fileId || !isValidFileId(fileId)) {
@@ -450,7 +548,6 @@ router.get("/files/:fileId/download", async (req, res): Promise<void> => {
     return;
   }
 
-  // Validate all chunks exist before starting the stream
   for (let i = 0; i < meta.chunkCount; i++) {
     if (!fs.existsSync(getChunkPath(fileId, i))) {
       res.status(500).json({ error: `Chunk ${i} is missing` });
@@ -465,7 +562,6 @@ router.get("/files/:fileId/download", async (req, res): Promise<void> => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Cache-Control", "no-cache");
 
-  // Stream each chunk directly to response — no in-memory concat
   const streamChunk = (i: number): void => {
     if (i >= meta.chunkCount) {
       res.end();
@@ -478,11 +574,11 @@ router.get("/files/:fileId/download", async (req, res): Promise<void> => {
     stream.pipe(res, { end: false });
   };
 
-  req.on("close", () => { /* client disconnected, stream will error naturally */ });
+  req.on("close", () => { /* client disconnected */ });
   streamChunk(0);
 });
 
-// ── GET /files/:fileId/chunks/:chunkIndex ────────────────────────────────────
+// ── GET /files/:fileId/chunks/:chunkIndex ─────────────────────────────────────
 router.get(
   "/files/:fileId/chunks/:chunkIndex",
   async (req, res): Promise<void> => {
@@ -519,10 +615,7 @@ router.get(
     }
 
     res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="chunk_${chunkIndex}.bin"`,
-    );
+    res.setHeader("Content-Disposition", `attachment; filename="chunk_${chunkIndex}.bin"`);
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
     res.sendFile(chunkPath);

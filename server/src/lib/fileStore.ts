@@ -27,12 +27,78 @@ export interface FileMeta {
   sha256?: string;
   groupId?: string;
   version?: number;
+  folderId?: string;
+}
+
+export interface FolderMeta {
+  id: string;
+  name: string;
+  createdAt: string;
 }
 
 export function ensureUploadsDir(): void {
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
+}
+
+export function getFoldersDir(): string {
+  return path.join(uploadsDir, "_folders");
+}
+
+export function ensureFoldersDir(): void {
+  const dir = getFoldersDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+export function getFolderMetaPath(folderId: string): string {
+  return path.join(getFoldersDir(), `${folderId}.json`);
+}
+
+const FOLDER_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidFolderId(folderId: string): boolean {
+  return FOLDER_ID_PATTERN.test(folderId);
+}
+
+export function saveFolderMeta(folder: FolderMeta): void {
+  ensureFoldersDir();
+  fs.writeFileSync(getFolderMetaPath(folder.id), JSON.stringify(folder, null, 2));
+}
+
+export function readFolderMeta(folderId: string): FolderMeta | null {
+  if (!isValidFolderId(folderId)) return null;
+  const p = getFolderMetaPath(folderId);
+  if (!fs.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf-8")) as FolderMeta;
+  } catch {
+    return null;
+  }
+}
+
+export function listFolders(): FolderMeta[] {
+  ensureFoldersDir();
+  const entries = fs.readdirSync(getFoldersDir()).filter((f) => f.endsWith(".json"));
+  const folders: FolderMeta[] = [];
+  for (const entry of entries) {
+    try {
+      const raw = fs.readFileSync(path.join(getFoldersDir(), entry), "utf-8");
+      folders.push(JSON.parse(raw) as FolderMeta);
+    } catch { /* skip corrupt entries */ }
+  }
+  return folders.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function deleteFolderMeta(folderId: string): boolean {
+  if (!isValidFolderId(folderId)) return false;
+  const p = getFolderMetaPath(folderId);
+  if (!fs.existsSync(p)) return false;
+  fs.unlinkSync(p);
+  return true;
 }
 
 const FILE_ID_PATTERN =
@@ -97,8 +163,8 @@ export function listAllFiles(): FileMeta[] {
   const files: FileMeta[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    // Skip temp upload files
     if (entry.name.startsWith("tmp_")) continue;
+    if (entry.name.startsWith("_")) continue;
     const meta = readMeta(entry.name);
     if (meta && !isFileExpired(meta)) files.push(meta);
   }
@@ -123,6 +189,7 @@ export function purgeExpiredFiles(): number {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     if (entry.name.startsWith("tmp_")) continue;
+    if (entry.name.startsWith("_")) continue;
     const meta = readMeta(entry.name);
     if (meta && isFileExpired(meta)) {
       deleteFile(meta.id);
@@ -132,11 +199,6 @@ export function purgeExpiredFiles(): number {
   return count;
 }
 
-/**
- * Split a file from disk (temp path) into chunk files.
- * Reads the file in CHUNK_SIZE pieces — never loads the whole file into RAM.
- * Deletes the temp file when done.
- */
 export function splitAndSaveFromPath(fileId: string, tempPath: string): number {
   const dir = getFileDir(fileId);
   fs.mkdirSync(dir, { recursive: true });
@@ -160,9 +222,6 @@ export function splitAndSaveFromPath(fileId: string, tempPath: string): number {
   return chunkCount;
 }
 
-/**
- * Legacy in-memory split — kept for any callers that still use it.
- */
 export function splitAndSave(fileId: string, buffer: Buffer): number {
   const dir = getFileDir(fileId);
   fs.mkdirSync(dir, { recursive: true });
@@ -188,7 +247,6 @@ export function buildChunkUrls(
   );
 }
 
-/** Return all versions of a group, sorted oldest→newest. */
 export function listVersions(groupId: string): FileMeta[] {
   ensureUploadsDir();
   const all = listAllFiles();
@@ -197,14 +255,13 @@ export function listVersions(groupId: string): FileMeta[] {
     .sort((a, b) => (a.version ?? 0) - (b.version ?? 0));
 }
 
-/** Return the next version number for a group (max existing + 1). */
 export function nextVersion(groupId: string): number {
   const versions = listVersions(groupId);
   if (versions.length === 0) return 2;
   return Math.max(...versions.map((f) => f.version ?? 1)) + 1;
 }
 
-export const UPLOAD_PART_SIZE = 5 * 1024 * 1024; // 5 MB per HTTP part
+export const UPLOAD_PART_SIZE = 5 * 1024 * 1024;
 
 export function getUploadTempDir(uploadId: string): string {
   return path.join(uploadsDir, `upload_${uploadId}`);
@@ -218,7 +275,6 @@ export function cleanupUpload(uploadId: string): void {
   try { fs.rmSync(getUploadTempDir(uploadId), { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
-/** SHA-256 of a file on disk, streaming — never loads the whole file into RAM. */
 export function sha256File(filePath: string): string {
   const hash = crypto.createHash("sha256");
   const fd = fs.openSync(filePath, "r");
@@ -234,10 +290,6 @@ export function sha256File(filePath: string): string {
   return hash.digest("hex");
 }
 
-/**
- * Concatenate ordered parts into a single temp file, then split into chunks.
- * Returns chunk count. Cleans up both parts dir and assembled temp file.
- */
 export function assembleAndSplit(uploadId: string, fileId: string, totalParts: number): number {
   ensureUploadsDir();
   const assembledPath = path.join(uploadsDir, `tmp_assembled_${fileId}`);

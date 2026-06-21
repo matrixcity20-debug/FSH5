@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { useLocation } from "wouter";
 import {
   UploadCloud, File, AlertCircle, Clock, Zap, Code2,
-  Shield, Radio, Server, Users, Wifi, WifiOff, X, GitBranch, Link2,
+  Shield, Radio, Server, Users, Wifi, WifiOff, X, GitBranch, Link2, Folder,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -30,7 +30,6 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
-/** Parse error message from API JSON response body, fallback to statusText */
 async function parseErrorMessage(res: Response): Promise<string> {
   try {
     const json = await res.clone().json() as Record<string, unknown>;
@@ -40,10 +39,6 @@ async function parseErrorMessage(res: Response): Promise<string> {
   return res.statusText || "An error occurred";
 }
 
-/**
- * Read file in CHUNK_SIZE slices, reporting progress.
- * Uses File.slice() + Uint8Array — never loads more than one chunk at a time.
- */
 function readFileChunks(
   file: File,
   onProgress?: (done: number, total: number) => void,
@@ -70,6 +65,12 @@ function readFileChunks(
 
     readNext();
   });
+}
+
+interface FolderMeta {
+  id: string;
+  name: string;
+  createdAt: string;
 }
 
 type SeedStatus = "idle" | "registering" | "seeding" | "offline";
@@ -105,6 +106,8 @@ export default function UploadPage() {
   const [parentFileId, setParentFileId] = useState<string | null>(null);
   const [parentFileName, setParentFileName] = useState<string | null>(null);
   const [versionLookupLoading, setVersionLookupLoading] = useState(false);
+  const [folders, setFolders] = useState<FolderMeta[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string>("");
   const inputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const xhrRef = useRef<XMLHttpRequest | null>(null);
@@ -112,7 +115,13 @@ export default function UploadPage() {
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const abortRef = useRef(false);
 
-  /** Extract fileId from a full URL like /files/<uuid> or bare uuid */
+  useEffect(() => {
+    fetch("/api/folders")
+      .then((r) => r.ok ? r.json() as Promise<FolderMeta[]> : [])
+      .then(setFolders)
+      .catch(() => setFolders([]));
+  }, []);
+
   const extractFileId = (input: string): string | null => {
     const uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
     const m = input.match(uuidRe);
@@ -141,11 +150,12 @@ export default function UploadPage() {
     }
   };
 
-  // Auto-link parent from query string: /?parentFileId=<uuid>
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const pid = params.get("parentFileId");
     if (pid) void lookupParent(pid);
+    const fid = params.get("folderId");
+    if (fid) setSelectedFolderId(fid);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -189,15 +199,13 @@ export default function UploadPage() {
 
   const isUploading = uploadStep.phase !== "idle";
 
-  // ── Server upload (chunked, with SHA-256 integrity check) ─────────────────
   const handleUpload = async () => {
     if (!file) return;
     abortRef.current = false;
 
-    const PART_SIZE = 5 * 1024 * 1024; // 5 MB per HTTP request
+    const PART_SIZE = 5 * 1024 * 1024;
 
     try {
-      // 1. Compute SHA-256 of the full file in the browser
       setUploadStep({ phase: "hashing" });
       const fileBuffer = await file.arrayBuffer();
       if (abortRef.current) return;
@@ -206,7 +214,6 @@ export default function UploadPage() {
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
 
-      // 2. Initialise upload session on the server
       const initRes = await fetch("/api/files/upload-init", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -223,7 +230,6 @@ export default function UploadPage() {
       }
       const { uploadId } = await initRes.json() as { uploadId: string };
 
-      // 3. Upload parts sequentially
       const totalParts = Math.ceil(file.size / PART_SIZE);
       let bytesDone = 0;
       setUploadStep({ phase: "uploading", done: 0, total: file.size });
@@ -250,7 +256,6 @@ export default function UploadPage() {
         setUploadStep({ phase: "uploading", done: bytesDone, total: file.size });
       }
 
-      // 4. Finalise — server assembles, verifies SHA-256, splits into chunks
       if (abortRef.current) return;
       setUploadStep({ phase: "finalizing" });
 
@@ -266,6 +271,7 @@ export default function UploadPage() {
           sha256,
           ...(ttl ? { ttl } : {}),
           ...(parentFileId ? { parentFileId } : {}),
+          ...(selectedFolderId ? { folderId: selectedFolderId } : {}),
         }),
       });
       if (abortRef.current) return;
@@ -286,13 +292,11 @@ export default function UploadPage() {
     }
   };
 
-  // ── P2P seed ───────────────────────────────────────────────────────────────
   const handleSeed = async () => {
     if (!file) return;
     abortRef.current = false;
 
     try {
-      // 1. Register seed with API
       setUploadStep({ phase: "connecting" });
       const chunkCount = Math.ceil(file.size / CHUNK_SIZE);
 
@@ -304,6 +308,7 @@ export default function UploadPage() {
           size: file.size,
           mimeType: file.type || "application/octet-stream",
           chunkCount,
+          ...(selectedFolderId ? { folderId: selectedFolderId } : {}),
         }),
       });
 
@@ -316,7 +321,6 @@ export default function UploadPage() {
       const meta = await res.json() as { id: string };
       const fileId = meta.id;
 
-      // 2. Read file into chunks — show real progress
       setUploadStep({ phase: "chunking", done: 0, total: chunkCount });
       const chunks = await readFileChunks(file, (done, total) => {
         if (!abortRef.current) {
@@ -326,7 +330,6 @@ export default function UploadPage() {
       if (abortRef.current) return;
       chunksRef.current = chunks;
 
-      // 3. Connect WebSocket and start seeding
       setUploadStep({ phase: "connecting" });
       const proto = window.location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
@@ -412,7 +415,6 @@ export default function UploadPage() {
             pc.close();
           };
 
-          // Queue ICE candidates until after setRemoteDescription
           const pendingCandidates: RTCIceCandidateInit[] = [];
           let remoteSet = false;
 
@@ -443,7 +445,6 @@ export default function UploadPage() {
           await pc.setLocalDescription(offer);
           ws.send(JSON.stringify({ type: "offer", to: leecherId, sdp: pc.localDescription }));
 
-          // Attach answer handler via message filtering
           const origOnmessage = ws.onmessage;
           ws.addEventListener("message", async (ev: MessageEvent) => {
             const m = JSON.parse(ev.data as string) as Record<string, unknown>;
@@ -493,7 +494,6 @@ export default function UploadPage() {
     abortRef.current = false;
   };
 
-  // ── Seeder active view ──────────────────────────────────────────────────────
   if (seederState) {
     const shareUrl = `${window.location.origin}/files/${seederState.fileId}`;
     const isOnline = seederState.status === "seeding";
@@ -548,7 +548,6 @@ export default function UploadPage() {
     );
   }
 
-  // ── Upload progress label ───────────────────────────────────────────────────
   const progressLabel = (() => {
     if (uploadStep.phase === "hashing")    return "Computing hash…";
     if (uploadStep.phase === "uploading")  return `Uploading… ${formatBytes(uploadStep.done)} / ${formatBytes(uploadStep.total)}`;
@@ -567,7 +566,6 @@ export default function UploadPage() {
     return 0;
   })();
 
-  // ── Main view ───────────────────────────────────────────────────────────────
   return (
     <div className="max-w-2xl mx-auto space-y-10 mt-8">
       <div className="space-y-4 text-center">
@@ -645,7 +643,8 @@ export default function UploadPage() {
                 <p className="text-sm text-muted-foreground">{formatBytes(file.size)}</p>
               </div>
 
-              <div className="flex flex-col items-center gap-4 w-full max-w-xs" onClick={(e) => e.stopPropagation()}>
+              <div className="flex flex-col items-center gap-4 w-full max-w-xs mx-auto" onClick={(e) => e.stopPropagation()}>
+                {/* TTL */}
                 <div className="flex items-center gap-2 bg-muted/50 border border-border rounded-lg px-3 py-2 w-full">
                   <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
                   <select
@@ -659,7 +658,24 @@ export default function UploadPage() {
                   </select>
                 </div>
 
-                {/* ── Versioning ── */}
+                {/* Folder selector */}
+                {folders.length > 0 && (
+                  <div className="flex items-center gap-2 bg-muted/50 border border-border rounded-lg px-3 py-2 w-full">
+                    <Folder className="w-4 h-4 text-muted-foreground shrink-0" />
+                    <select
+                      value={selectedFolderId}
+                      onChange={(e) => setSelectedFolderId(e.target.value)}
+                      className="bg-transparent text-sm font-mono text-foreground focus:outline-none w-full"
+                    >
+                      <option value="" className="bg-card">No folder (root)</option>
+                      {folders.map((f) => (
+                        <option key={f.id} value={f.id} className="bg-card">{f.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Versioning */}
                 <div className="w-full space-y-2">
                   <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
                     <GitBranch className="w-3.5 h-3.5" />
